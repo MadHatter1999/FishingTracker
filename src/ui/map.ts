@@ -226,22 +226,25 @@ export function mountMap(opts: MountOpts): MapApi {
   });
 
   // --- "you are here" live self-location (for orientation; not the guild feed) ---
-  // A hook + dot that follows the device's GPS, shown whether or not the user is
-  // sharing with the guild, so you can orient yourself on the water.
-  const selfIcon = L.divIcon({ className: "", html: `<div class="mk-self" style="--ac:${selfColor}">🪝</div>`, iconSize: [30, 30], iconAnchor: [15, 28] });
-  let selfMarker: L.Marker | null = null;
+  // A small coloured dot follows the device's GPS, shown whether or not the user
+  // is sharing with the guild, so you can orient yourself on the water.
   let selfDot: L.CircleMarker | null = null;
   let selfRing: L.Circle | null = null;
   let selfLatLng: L.LatLng | null = null;
   function setSelf(lat: number, lon: number, accuracy?: number) {
     selfLatLng = L.latLng(lat, lon);
-    if (!selfMarker) {
-      selfMarker = L.marker(selfLatLng, { icon: selfIcon, zIndexOffset: 1500, interactive: true }).addTo(map);
-      selfMarker.bindTooltip("You (live position)", { direction: "top" });
-      selfDot = L.circleMarker(selfLatLng, { radius: 5, color: "#ffffff", weight: 2, fillColor: selfColor, fillOpacity: 1 }).addTo(map);
+    if (!selfDot) {
+      selfDot = L.circleMarker(selfLatLng, {
+        radius: 6,
+        color: "#ffffff",
+        weight: 2,
+        fillColor: selfColor,
+        fillOpacity: 1,
+        pane: "markerPane",
+      }).addTo(map);
+      selfDot.bindTooltip("You (live position)", { direction: "top" });
     } else {
-      selfMarker.setLatLng(selfLatLng);
-      selfDot?.setLatLng(selfLatLng);
+      selfDot.setLatLng(selfLatLng);
     }
     if (accuracy && accuracy > 0 && accuracy < 3000) {
       if (!selfRing) selfRing = L.circle(selfLatLng, { radius: accuracy, color: selfColor, weight: 1, opacity: 0.4, fillColor: selfColor, fillOpacity: 0.08 }).addTo(map);
@@ -249,8 +252,8 @@ export function mountMap(opts: MountOpts): MapApi {
     }
   }
   function clearSelf() {
-    selfMarker?.remove(); selfDot?.remove(); selfRing?.remove();
-    selfMarker = null; selfDot = null; selfRing = null; selfLatLng = null;
+    selfDot?.remove(); selfRing?.remove();
+    selfDot = null; selfRing = null; selfLatLng = null;
   }
 
   setTimeout(() => map.invalidateSize(), 60);

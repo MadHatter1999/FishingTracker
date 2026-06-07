@@ -469,12 +469,12 @@ function tabMap(b: Bundle): string {
       <span><span class="legend-dot" style="background:#ffcf5c"></span> saved spot</span>
       <span>★ McCormacks (home)</span>
       <span>🪝 selected</span>
-      <span>🪝 you (live, pulsing)</span>
+      <span><span class="legend-dot" style="background:${esc(state.user?.color ?? "#36c2ce")}"></span> you (live)</span>
       <span>🪝 guild member (their colour)</span>
       <span style="color:#5ad1ff">━ boatable link</span>
       <span style="color:#7ce0a0">┄ fishable link</span>
     </div>
-    <p class="note-sm">Your own <b>live position</b> (pulsing hook + dot) follows you for orientation while the Map tab is open, whether or not you're sharing. Tap <b>📍 Find me</b> to recentre. Turn on <b>📡 Share location</b> (top of the page) to also let the guild see your hook live. Toggle <b>Guild members</b>, <b>Sea charts / depths</b>, <b>Bathymetry</b> and <b>Waterway links</b> with the layers control (top-right of the map).</p>
+    <p class="note-sm">Your own <b>live position</b> dot follows you for orientation while the Map tab is open, whether or not you're sharing. Tap <b>📍 Find me</b> to recentre. Turn on <b>📡 Share location</b> (top of the page) to also let the guild see your position live. Toggle <b>Guild members</b>, <b>Sea charts / depths</b>, <b>Bathymetry</b> and <b>Waterway links</b> with the layers control (top-right of the map).</p>
     ${savedSpotsList()}
   </div>`;
 }
