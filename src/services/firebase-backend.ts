@@ -45,6 +45,7 @@ function toUser(uid: string, d: UserDoc, online?: boolean): GuildUser {
 function mapAuthError(e: unknown): string {
   const code = (e as { code?: string })?.code || "";
   if (code.includes("invalid-credential") || code.includes("wrong-password") || code.includes("user-not-found")) return "Invalid username or password";
+  if (code.includes("configuration-not-found")) return "Firebase Authentication is not enabled for this project. In Firebase Console, open nova-scotian-anglers > Build > Authentication > Get started, then enable Email/Password.";
   if (code.includes("too-many-requests")) return "Too many attempts - try again shortly";
   if (code.includes("email-already-in-use")) return "That username is already taken";
   if (code.includes("weak-password")) return "Password must be at least 6 characters";
