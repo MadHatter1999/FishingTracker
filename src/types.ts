@@ -125,6 +125,12 @@ export interface CatchRecord {
   waterTemp?: string;
 }
 
+// A catch-log trip with its owner, for the admin cross-member view (Firebase).
+export interface MemberTrip extends CatchRecord {
+  userId: string | number;
+  displayName: string;
+}
+
 export interface FishingLocation {
   id: string; // "home" or IWLS station id
   name: string;

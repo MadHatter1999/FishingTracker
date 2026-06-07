@@ -10,7 +10,7 @@ import {
   doc, getDoc, getDocs, setDoc, updateDoc, collection, onSnapshot, deleteDoc, serverTimestamp,
 } from "firebase/firestore";
 import { fbApp, fbAuth, fbDb, emailFor } from "./firebase";
-import type { GuildUser, AnglerPresence } from "../types";
+import type { GuildUser, AnglerPresence, CatchRecord, MemberTrip } from "../types";
 
 const SHARE_KEY = "guild.share.v1";
 const STALE_MS = 60000; // hide members whose last ping is older than this
@@ -199,6 +199,31 @@ export async function setUserActive(id: string | number, active: boolean): Promi
 // No Admin SDK on Spark -> "remove" = disable (lock out). Account can be re-enabled.
 export async function deleteUser(id: string | number): Promise<void> {
   await setUserActive(id, false);
+}
+
+// ---- catch-log trips (synced so admins can see everyone's) ----
+export async function saveTrip(trip: CatchRecord): Promise<void> {
+  const me = fbAuth().currentUser;
+  if (!me) return;
+  await setDoc(doc(fbDb(), "trips", String(trip.id)), {
+    ...trip,
+    userId: me.uid,
+    displayName: currentProfile?.displayName ?? "Angler",
+    createdAt: new Date().toISOString(),
+  });
+}
+
+export async function deleteTrip(id: string): Promise<void> {
+  await deleteDoc(doc(fbDb(), "trips", id)).catch(() => {});
+}
+
+// Admin-only: every member's trips, newest first.
+export async function listAllTrips(): Promise<MemberTrip[]> {
+  const snap = await getDocs(collection(fbDb(), "trips"));
+  const out: MemberTrip[] = [];
+  snap.forEach((d) => out.push(d.data() as MemberTrip));
+  out.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
+  return out;
 }
 
 // ---- live presence (Firestore realtime) ----

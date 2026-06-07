@@ -352,3 +352,49 @@ label.field.wide { grid-column: 1 / -1; }
   .brand h1 { font-size: 17px; }
   .daychip { min-width: 66px; }
 }
+
+/* ---------- "You are here" live self marker (transparent - just the hook) ---------- */
+.mk-self {
+  width: 28px; height: 28px; display: grid; place-items: center;
+  font-size: 22px; line-height: 1; border-radius: 50%;
+  background: transparent;
+  filter: drop-shadow(0 2px 4px rgba(0,0,0,.8));
+  animation: selfpulse 1.8s ease-out infinite;
+}
+@keyframes selfpulse {
+  0%   { box-shadow: 0 0 0 0 rgba(255,255,255,.5); }
+  70%  { box-shadow: 0 0 0 12px rgba(255,255,255,0); }
+  100% { box-shadow: 0 0 0 0 rgba(255,255,255,0); }
+}
+
+/* ---------- Handbook PDF viewer ---------- */
+.pdfwrap { height: 72vh; }
+.pdfframe { width: 100%; height: 100%; border: 1px solid var(--line); border-radius: 12px; background: #fff; display: block; }
+
+/* ---------- Mobile fullscreen (map + tide chart + handbook) ---------- */
+.mobile-only { display: none; }
+.fs-host.fs {
+  position: fixed; inset: 0; z-index: 3000;
+  width: 100vw; height: 100vh; height: 100dvh;
+  max-width: none; margin: 0; padding: 0; border-radius: 0; border: 0;
+}
+.mapcanvas.fs { height: 100vh; height: 100dvh; }
+.fs-host.fs.tidechart {
+  background: var(--bg); padding: 16px;
+  display: flex; align-items: center; justify-content: center;
+}
+.fs-host.fs.tidechart svg { width: 100%; height: auto; max-height: 100%; }
+.fs-host.fs.pdfwrap { background: var(--bg); }
+.fs-host.fs .pdfframe { height: 100%; border-radius: 0; border: 0; }
+.fs-close {
+  position: absolute; z-index: 3001;
+  top: calc(8px + env(safe-area-inset-top, 0px));
+  left: 50%; transform: translateX(-50%);
+  box-shadow: 0 4px 14px rgba(0,0,0,.5);
+}
+html.fs-lock, html.fs-lock body { overflow: hidden; }
+
+@media (max-width: 600px) {
+  .mobile-only { display: inline-flex; }
+  .pdfwrap { height: 68vh; }
+}

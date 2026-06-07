@@ -10,6 +10,10 @@ export interface MapApi {
   flyTo(lat: number, lon: number, zoom?: number): void;
   fitPredators(): void;
   setPresence(anglers: AnglerPresence[], selfId?: string | number): void;
+  setSelfLocation(lat: number, lon: number, accuracy?: number): void;
+  clearSelfLocation(): void;
+  centerOnSelf(): boolean;
+  resize(): void;
   destroy(): void;
 }
 
@@ -36,6 +40,7 @@ interface MountOpts {
   predators?: TaggedAnimal[];
   presence?: AnglerPresence[];
   selfId?: string | number;
+  selfColor?: string;
   onSelect: (loc: FishingLocation) => void;
   onRemoveSaved: (id: string) => void;
 }
@@ -66,7 +71,7 @@ function animalPopup(a: TaggedAnimal): string {
 }
 
 export function mountMap(opts: MountOpts): MapApi {
-  const { container, locations, active, predators = [], presence = [], selfId, onSelect, onRemoveSaved } = opts;
+  const { container, locations, active, predators = [], presence = [], selfId, selfColor = "#36c2ce", onSelect, onRemoveSaved } = opts;
 
   const map = L.map(container, { zoomControl: true }).setView([active.lat, active.lon], active.home ? 12 : active.kind === "fresh" ? 13 : 10);
 
@@ -220,6 +225,34 @@ export function mountMap(opts: MountOpts): MapApi {
     onSelect(loc);
   });
 
+  // --- "you are here" live self-location (for orientation; not the guild feed) ---
+  // A hook + dot that follows the device's GPS, shown whether or not the user is
+  // sharing with the guild, so you can orient yourself on the water.
+  const selfIcon = L.divIcon({ className: "", html: `<div class="mk-self" style="--ac:${selfColor}">🪝</div>`, iconSize: [30, 30], iconAnchor: [15, 28] });
+  let selfMarker: L.Marker | null = null;
+  let selfDot: L.CircleMarker | null = null;
+  let selfRing: L.Circle | null = null;
+  let selfLatLng: L.LatLng | null = null;
+  function setSelf(lat: number, lon: number, accuracy?: number) {
+    selfLatLng = L.latLng(lat, lon);
+    if (!selfMarker) {
+      selfMarker = L.marker(selfLatLng, { icon: selfIcon, zIndexOffset: 1500, interactive: true }).addTo(map);
+      selfMarker.bindTooltip("You (live position)", { direction: "top" });
+      selfDot = L.circleMarker(selfLatLng, { radius: 5, color: "#ffffff", weight: 2, fillColor: selfColor, fillOpacity: 1 }).addTo(map);
+    } else {
+      selfMarker.setLatLng(selfLatLng);
+      selfDot?.setLatLng(selfLatLng);
+    }
+    if (accuracy && accuracy > 0 && accuracy < 3000) {
+      if (!selfRing) selfRing = L.circle(selfLatLng, { radius: accuracy, color: selfColor, weight: 1, opacity: 0.4, fillColor: selfColor, fillOpacity: 0.08 }).addTo(map);
+      else { selfRing.setLatLng(selfLatLng); selfRing.setRadius(accuracy); }
+    }
+  }
+  function clearSelf() {
+    selfMarker?.remove(); selfDot?.remove(); selfRing?.remove();
+    selfMarker = null; selfDot = null; selfRing = null; selfLatLng = null;
+  }
+
   setTimeout(() => map.invalidateSize(), 60);
 
   return {
@@ -231,6 +264,14 @@ export function mountMap(opts: MountOpts): MapApi {
       map.fitBounds(L.latLngBounds(predators.map((a) => [a.lat, a.lon] as [number, number])).pad(0.2));
     },
     setPresence: (anglers, self) => renderPresence(anglers, self),
+    setSelfLocation: (lat, lon, accuracy) => setSelf(lat, lon, accuracy),
+    clearSelfLocation: () => clearSelf(),
+    centerOnSelf: () => {
+      if (!selfLatLng) return false;
+      map.flyTo(selfLatLng, Math.max(map.getZoom(), 14));
+      return true;
+    },
+    resize: () => map.invalidateSize(),
     destroy: () => map.remove(),
   };
 }

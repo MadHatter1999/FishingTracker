@@ -12,7 +12,7 @@ import type { MapApi } from "./map";
 import { moonEmoji, moonInfo } from "../services/astronomy";
 import { fmtTime, fmtRange, fmtWeekday, fmtDate } from "../util/format";
 import type { Bundle, ScoredHour, CatchRecord, HourPoint, FishingLocation, GuildUser, AnglerPresence } from "../types";
-import { fetchMe, logout as apiLogout, getCurrentUser } from "../services/api";
+import { fetchMe, logout as apiLogout, getCurrentUser, syncTripSave, syncTripDelete } from "../services/api";
 import { connect as presenceConnect, disconnect as presenceDisconnect, onRoster, toggleSharing, loadSharePref } from "../services/presence";
 import { renderLogin } from "./login";
 import { openAdminPanel } from "./admin";
@@ -54,6 +54,7 @@ const TABS = [
   ["log", "Catch Log"],
   ["analysis", "Analysis"],
   ["briefing", "Briefing"],
+  ["handbook", "Handbook"],
 ];
 
 const root = () => document.getElementById("app")!;
@@ -132,6 +133,61 @@ function teardownMap() {
   if (mapApi) { mapApi.destroy(); mapApi = null; }
 }
 
+// Live "you are here" position for self-orientation on the map. Runs locally
+// while the map tab is open (independent of guild sharing) so you can see the
+// hook follow you whether or not you're broadcasting to the guild.
+let selfWatchId: number | null = null;
+let selfLoc: { lat: number; lon: number; acc: number } | null = null;
+function startSelfWatch() {
+  if (!("geolocation" in navigator) || selfWatchId != null) return;
+  selfWatchId = navigator.geolocation.watchPosition(
+    (pos) => {
+      selfLoc = { lat: pos.coords.latitude, lon: pos.coords.longitude, acc: pos.coords.accuracy };
+      mapApi?.setSelfLocation(selfLoc.lat, selfLoc.lon, selfLoc.acc);
+    },
+    () => { /* permission denied / unavailable - just no self marker */ },
+    { enableHighAccuracy: true, maximumAge: 5000, timeout: 20000 }
+  );
+}
+function stopSelfWatch() {
+  if (selfWatchId != null) { navigator.geolocation.clearWatch(selfWatchId); selfWatchId = null; }
+}
+
+// Mobile fullscreen for the map / tide chart / handbook. CSS-overlay based
+// (works on iOS, where the native Fullscreen API doesn't apply to arbitrary
+// elements, and gives true fullscreen in the installed PWA). The exit button is
+// a child of the host so it stays visible on top of the map.
+function setFullscreen(host: HTMLElement, on: boolean, onResize?: () => void) {
+  host.classList.toggle("fs", on);
+  document.documentElement.classList.toggle("fs-lock", on);
+  let btn = host.querySelector<HTMLButtonElement>(":scope > .fs-close");
+  if (on) {
+    if (!btn) {
+      btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "btn primary fs-close";
+      btn.textContent = "✕ Exit fullscreen";
+      btn.addEventListener("click", (ev) => { ev.stopPropagation(); setFullscreen(host, false, onResize); });
+      host.appendChild(btn);
+    }
+  } else {
+    btn?.remove();
+  }
+  bumpResize(onResize);
+}
+function bumpResize(onResize?: () => void) {
+  if (!onResize) return;
+  requestAnimationFrame(() => requestAnimationFrame(onResize));
+  setTimeout(onResize, 260);
+}
+function clearFullscreen() {
+  document.querySelectorAll<HTMLElement>(".fs-host.fs").forEach((e) => {
+    e.classList.remove("fs");
+    e.querySelector<HTMLElement>(":scope > .fs-close")?.remove();
+  });
+  document.documentElement.classList.remove("fs-lock");
+}
+
 function useDeviceLocation() {
   if (!("geolocation" in navigator)) {
     toast("Geolocation not supported on this device");
@@ -141,7 +197,7 @@ function useDeviceLocation() {
   navigator.geolocation.getCurrentPosition(
     (pos) => {
       const { latitude, longitude } = pos.coords;
-      const loc = locationForPoint(latitude, longitude, allLocations(), "My location");
+      const loc = locationForPoint(latitude, longitude, allLocations(), "Live Location");
       selectLocation(loc);
     },
     (err) => toast(`Location failed: ${err.message}`),
@@ -167,6 +223,7 @@ function esc(s: string): string {
 
 function render() {
   teardownMap();
+  clearFullscreen();
   const b = state.bundle;
   if (state.error || !b) {
     root().innerHTML = `<div class="card" style="margin-top:40px">
@@ -202,7 +259,7 @@ function scrollActiveTabIntoView() {
 }
 
 async function postRender() {
-  if (state.tab !== "map") return;
+  if (state.tab !== "map") { stopSelfWatch(); return; }
   const el = document.getElementById("mapcanvas");
   if (!el) return;
   teardownMap();
@@ -216,6 +273,7 @@ async function postRender() {
     predators: state.bundle?.predators ?? [],
     presence: state.presence,
     selfId: state.user?.id,
+    selfColor: state.user?.color,
     onSelect: (loc) => selectLocation(loc),
     onRemoveSaved: (id) => {
       state.saved = removeSpot(id);
@@ -223,6 +281,8 @@ async function postRender() {
       render();
     },
   });
+  startSelfWatch();
+  if (selfLoc) mapApi.setSelfLocation(selfLoc.lat, selfLoc.lon, selfLoc.acc);
 }
 
 // Placing the hook (clicking the map / a marker / device location) immediately
@@ -350,8 +410,29 @@ function renderTab(b: Bundle, ctx: DayContext): string {
     case "log": return tabLog();
     case "analysis": return tabAnalysis(ctx);
     case "briefing": return tabBriefing(b, ctx);
+    case "handbook": return tabHandbook();
     default: return "";
   }
+}
+
+/* ---------- HANDBOOK (NS Anglers' Handbook PDF) ---------- */
+const HANDBOOK_PDF = "https://www.novascotia.ca/sites/default/files/documents/1-2412/anglers-handbook-en.pdf";
+function tabHandbook(): string {
+  const viewer = `https://docs.google.com/viewer?embedded=true&url=${encodeURIComponent(HANDBOOK_PDF)}`;
+  return `<div class="card">
+    <div class="flex spread" style="gap:10px;flex-wrap:wrap">
+      <h2 style="margin:0">NS Anglers' Handbook</h2>
+      <span class="flex" style="flex-wrap:wrap">
+        <a class="btn small" href="${HANDBOOK_PDF}" target="_blank" rel="noopener">↗ Open / download PDF</a>
+        <button class="btn small mobile-only" data-action="handbook-fs">⛶ Fullscreen</button>
+      </span>
+    </div>
+    <p class="note-sm">Official Nova Scotia Anglers' Handbook (open seasons, size & bag limits, licences, gear rules). This is the final word, it overrides the app's guidance whenever they differ.</p>
+    <div id="handbook" class="fs-host pdfwrap mt">
+      <iframe class="pdfframe" src="${viewer}" title="NS Anglers' Handbook" loading="lazy" referrerpolicy="no-referrer"></iframe>
+    </div>
+    <p class="note-sm">If the viewer doesn't load (or on some phones), tap <b>Open / download PDF</b> above to read it in your device's PDF reader.</p>
+  </div>`;
 }
 
 /* ---------- MAP / LOCATION ---------- */
@@ -362,7 +443,7 @@ function tabMap(b: Bundle): string {
     <div class="flex spread" style="flex-wrap:wrap;gap:10px">
       <h2 style="margin:0">Pick your fishing spot</h2>
       <div class="flex" style="flex-wrap:wrap">
-        <button class="btn small" data-action="geo">📍 Use my location</button>
+        <button class="btn small" data-action="geo">📍 Use live location</button>
         <button class="btn small" data-action="home-loc">★ McCormacks Beach</button>
       </div>
     </div>
@@ -370,10 +451,12 @@ function tabMap(b: Bundle): string {
       Click anywhere on the water to fish that exact spot (weather is taken at the point, tides from the nearest CHS gauge),
       tap a blue dot to use a tide station directly, or use your device location. Currently showing ${count}.
     </p>
-    <div id="mapcanvas" class="mapcanvas"></div>
+    <div id="mapcanvas" class="mapcanvas fs-host"></div>
     <div class="map-toolbar mt">
       <span class="muted">Fishing: <b>${esc(b.location.name)}</b> <span class="muted">${esc(b.location.area)}</span></span>
-      <span class="flex">
+      <span class="flex" style="flex-wrap:wrap">
+        <button class="btn small" data-action="center-self">📍 Find me</button>
+        <button class="btn small mobile-only" data-action="map-fs">⛶ Fullscreen</button>
         ${b.location.kind !== "fresh" && b.predators.length ? `<button class="btn small" data-action="fit-preds">🦈 Show ${b.predators.length} tagged animals</button>` : ""}
         <button id="map-save" class="btn small" data-action="save-spot" ${b.location.saved ? "disabled" : ""}>＋ Save this spot</button>
       </span>
@@ -386,11 +469,12 @@ function tabMap(b: Bundle): string {
       <span><span class="legend-dot" style="background:#ffcf5c"></span> saved spot</span>
       <span>★ McCormacks (home)</span>
       <span>🪝 selected</span>
+      <span>🪝 you (live, pulsing)</span>
       <span>🪝 guild member (their colour)</span>
       <span style="color:#5ad1ff">━ boatable link</span>
       <span style="color:#7ce0a0">┄ fishable link</span>
     </div>
-    <p class="note-sm">Toggle <b>Guild members</b>, <b>Sea charts / depths</b>, <b>Bathymetry</b> and <b>Waterway links</b> with the layers control (top-right of the map). Turn on <b>📡 Share location</b> (top of the page) to let the guild see your hook live.</p>
+    <p class="note-sm">Your own <b>live position</b> (pulsing hook + dot) follows you for orientation while the Map tab is open, whether or not you're sharing. Tap <b>📍 Find me</b> to recentre. Turn on <b>📡 Share location</b> (top of the page) to also let the guild see your hook live. Toggle <b>Guild members</b>, <b>Sea charts / depths</b>, <b>Bathymetry</b> and <b>Waterway links</b> with the layers control (top-right of the map).</p>
     ${savedSpotsList()}
   </div>`;
 }
@@ -529,8 +613,11 @@ function tabTide(b: Bundle, ctx: DayContext): string {
   const exes = b.tide.extremes.filter((e) => localDateKey(e.time) === localDateKey(ctx.date));
   return `
   <div class="card">
-    <h2>Tide Curve - ${fmtDate(ctx.date)} <span class="muted" style="text-transform:none">(${b.tide.stationName})</span></h2>
-    ${tideChartSVG(b, ctx.date, ctx.windows)}
+    <div class="flex spread" style="gap:10px">
+      <h2 style="margin:0">Tide Curve - ${fmtDate(ctx.date)} <span class="muted" style="text-transform:none">(${b.tide.stationName})</span></h2>
+      <button class="btn small mobile-only" data-action="tide-fs">⛶ Fullscreen</button>
+    </div>
+    <div id="tidechart" class="fs-host tidechart mt">${tideChartSVG(b, ctx.date, ctx.windows)}</div>
     <div class="note-sm flex" style="flex-wrap:wrap;gap:14px">
       <span>🟦 High/Low markers</span><span>🟩 shaded = best fishing windows</span><span>🟡 now</span>
       <span>Mean range ≈ ${b.tide.meanRange.toFixed(1)} m</span>
@@ -882,6 +969,24 @@ async function handleAction(action: string, el: HTMLElement, e: Event) {
     case "fit-preds":
       mapApi?.fitPredators();
       break;
+    case "center-self":
+      if (!mapApi?.centerOnSelf()) toast("Waiting for your GPS fix... allow location access");
+      break;
+    case "map-fs": {
+      const host = document.getElementById("mapcanvas");
+      if (host) setFullscreen(host, !host.classList.contains("fs"), () => mapApi?.resize());
+      break;
+    }
+    case "tide-fs": {
+      const host = document.getElementById("tidechart");
+      if (host) setFullscreen(host, !host.classList.contains("fs"));
+      break;
+    }
+    case "handbook-fs": {
+      const host = document.getElementById("handbook");
+      if (host) setFullscreen(host, !host.classList.contains("fs"));
+      break;
+    }
     case "toggle-share": {
       const now = toggleSharing();
       const btn = document.getElementById("sharebtn");
@@ -900,7 +1005,7 @@ async function handleAction(action: string, el: HTMLElement, e: Event) {
       break;
     case "save-spot": {
       const base = state.location;
-      const name = prompt("Name this spot:", /^(Pinned spot|My location)/.test(base.name) ? "" : base.name);
+      const name = prompt("Name this spot:", /^(Pinned spot|Live Location|My location)/.test(base.name) ? "" : base.name);
       if (name && name.trim()) {
         state.saved = addSpot(base, name);
         toast("Spot saved");
@@ -918,10 +1023,13 @@ async function handleAction(action: string, el: HTMLElement, e: Event) {
       if (loc) selectLocation(loc);
       break;
     }
-    case "del":
-      state.log = deleteRecord(el.dataset.id!);
+    case "del": {
+      const id = el.dataset.id!;
+      state.log = deleteRecord(id);
+      syncTripDelete(id);
       render();
       break;
+    }
     case "seed":
       state.log = seedSamples();
       toast("Loaded sample trips");
@@ -929,6 +1037,7 @@ async function handleAction(action: string, el: HTMLElement, e: Event) {
       break;
     case "clearlog":
       if (confirm("Delete all logged trips? This cannot be undone.")) {
+        for (const r of state.log) syncTripDelete(r.id);
         state.log = [];
         localStorage.removeItem("mccormacks.catchlog.v1");
         render();
@@ -968,6 +1077,7 @@ function onLogSubmit(e: Event) {
     waterTemp: waterSnap,
   };
   state.log = addRecord(rec);
+  syncTripSave(rec); // share to the guild backend so admins can see it (Firebase)
   toast("Trip added to log");
   state.tab = "analysis";
   render();

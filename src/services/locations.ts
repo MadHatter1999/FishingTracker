@@ -2,13 +2,23 @@ import type { FishingLocation } from "../types";
 import { LOCATION, NS_LAKES } from "../config";
 
 // Decide the right location for an arbitrary clicked/device point: if it falls
-// within a known lake's radius treat it as freshwater (that lake's species),
-// otherwise it's a saltwater spot using the nearest tide gauge.
+// on a known lake's actual water body (OSM bounding box, with a small shoreline
+// margin) treat it as freshwater; otherwise it's a saltwater spot using the
+// nearest tide gauge. Falls back to a radius for any lake without a bbox.
+const LAKE_MARGIN_DEG = 0.0006; // ~60 m buffer so a shoreline cast still counts
 export function locationForPoint(lat: number, lon: number, list: FishingLocation[], label = "Pinned spot"): FishingLocation {
   let near: { name: string; km: number; brackish: boolean } | null = null;
   for (const lk of NS_LAKES) {
+    let onLake: boolean;
+    if (lk.bbox) {
+      const [s, w, n, e] = lk.bbox;
+      onLake = lat >= s - LAKE_MARGIN_DEG && lat <= n + LAKE_MARGIN_DEG && lon >= w - LAKE_MARGIN_DEG && lon <= e + LAKE_MARGIN_DEG;
+    } else {
+      onLake = haversineKm(lat, lon, lk.lat, lk.lon) <= lk.radiusKm;
+    }
+    if (!onLake) continue;
     const km = haversineKm(lat, lon, lk.lat, lk.lon);
-    if (km <= lk.radiusKm && (!near || km < near.km)) near = { name: lk.name, km, brackish: lk.brackish ?? false };
+    if (!near || km < near.km) near = { name: lk.name, km, brackish: lk.brackish ?? false };
   }
   if (near) {
     const lat5 = +lat.toFixed(5), lon5 = +lon.toFixed(5);

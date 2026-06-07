@@ -37,6 +37,11 @@ where members can see each other's location as coloured hooks.
   remove members. New members can't be self-registered; only an admin can add them.
 - **Installable PWA** - install to your phone's home screen and it launches full-screen; the app
   shell works offline (live data still needs a connection).
+- **Live "you are here"** - a pulsing hook follows your GPS on the map for orientation (independent
+  of guild sharing); "Find me" recentres, and the map / tide chart / handbook have a mobile fullscreen.
+- **NS Anglers' Handbook** - a built-in, mobile-friendly viewer of the official handbook PDF, for everyone.
+- **Admin trip oversight** - on the Firebase backend, the admin can review every member's logged
+  trips & notes from the Members panel (members otherwise keep their own log private to their device).
 
 ## Guild membership
 

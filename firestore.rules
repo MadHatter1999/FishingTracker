@@ -36,6 +36,14 @@ service cloud.firestore {
       allow write: if isActiveMember() && request.auth.uid == uid;
     }
 
+    match /trips/{tripId} {
+      // Admins can read every member's trips & notes; members read only their own.
+      allow read: if isAdmin() || (isActiveMember() && resource.data.userId == request.auth.uid);
+      // You create/edit/remove only your own trips; admins may remove any.
+      allow create: if isActiveMember() && request.resource.data.userId == request.auth.uid;
+      allow update, delete: if isAdmin() || (isActiveMember() && resource.data.userId == request.auth.uid);
+    }
+
     match /meta/{doc} {
       allow read: if signedIn();
       allow write: if isAdmin();

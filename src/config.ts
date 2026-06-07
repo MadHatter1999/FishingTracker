@@ -569,25 +569,27 @@ export const EURYHALINE_KEYS = new Set<string>([
 
 // ---- Notable Nova Scotia freshwater fishing lakes (starter set; add your own via the map) ----
 // Lake centres + sizes from OpenStreetMap (Overpass). Regenerate via: node scripts/gen-lakes.mjs
-export const NS_LAKES: { name: string; lat: number; lon: number; note: string; radiusKm: number; brackish?: boolean }[] = [
-  { name: "Porters Lake", lat: 44.72542, lon: -63.33206, note: "Large tidal/estuarine lake; smallmouth/pickerel/perch up top, brackish & sea fish near the south outlet", radiusKm: 4, brackish: true },
-  { name: "Lake Banook", lat: 44.67921, lon: -63.55626, note: "Dartmouth, smallmouth/perch; Shubenacadie Canal system", radiusKm: 0.8 },
-  { name: "Lake Micmac", lat: 44.69229, lon: -63.55371, note: "Dartmouth, bass/perch; linked to Banook & Charles", radiusKm: 1.1 },
-  { name: "Lake Charles", lat: 44.72321, lon: -63.55181, note: "Shubenacadie Canal chain, bass/pickerel", radiusKm: 1.7 },
-  { name: "Long Lake", lat: 44.62334, lon: -63.64055, note: "Halifax/Spryfield reservoir, trout/bass, shore access", radiusKm: 1.7 },
-  { name: "First Lake", lat: 44.77043, lon: -63.66105, note: "Lower Sackville, perch/bass/pickerel", radiusKm: 1.2 },
-  { name: "Shubenacadie Grand Lake", lat: 44.90942, lon: -63.60049, note: "Major lake on the Shubenacadie system, boatable to Fundy; bass/perch/pickerel", radiusKm: 4 },
-  { name: "Lake Echo", lat: 44.71993, lon: -63.37986, note: "Bass/pickerel/perch, east of Dartmouth", radiusKm: 2.3 },
-  { name: "Williams Lake", lat: 44.61929, lon: -63.59688, note: "Halifax, trout/bass, quiet shore fishing", radiusKm: 0.8 },
+// bbox = [minLat, minLon, maxLat, maxLon] of the actual water body (from OSM),
+// used for accurate "is this point on the lake" tests; radiusKm is the fallback.
+export const NS_LAKES: { name: string; lat: number; lon: number; note: string; radiusKm: number; brackish?: boolean; bbox?: [number, number, number, number] }[] = [
+  { name: "Porters Lake", lat: 44.72542, lon: -63.33206, note: "Large tidal/estuarine lake; smallmouth/pickerel/perch up top, brackish & sea fish near the south outlet", radiusKm: 2.5, brackish: true },
+  { name: "Lake Banook", lat: 44.67921, lon: -63.55626, note: "Dartmouth, smallmouth/perch; Shubenacadie Canal system", radiusKm: 0.8, bbox: [44.67398, -63.56304, 44.68445, -63.54948] },
+  { name: "Lake Micmac", lat: 44.69229, lon: -63.55371, note: "Dartmouth, bass/perch; linked to Banook & Charles", radiusKm: 1.1, bbox: [44.68353, -63.56125, 44.70104, -63.54618] },
+  { name: "Lake Charles", lat: 44.72321, lon: -63.55181, note: "Shubenacadie Canal chain, bass/pickerel", radiusKm: 1.7, bbox: [44.70808, -63.55789, 44.73834, -63.54573] },
+  { name: "Long Lake", lat: 44.62334, lon: -63.64055, note: "Halifax/Spryfield reservoir, trout/bass, shore access", radiusKm: 1.7, bbox: [44.61367, -63.65936, 44.633, -63.62174] },
+  { name: "First Lake", lat: 44.77043, lon: -63.66105, note: "Lower Sackville, perch/bass/pickerel", radiusKm: 1.2, bbox: [44.76409, -63.67373, 44.77676, -63.64838] },
+  { name: "Shubenacadie Grand Lake", lat: 44.90942, lon: -63.60049, note: "Major lake on the Shubenacadie system, boatable to Fundy; bass/perch/pickerel", radiusKm: 4, bbox: [44.86337, -63.62968, 44.95547, -63.57129] },
+  { name: "Lake Echo", lat: 44.71993, lon: -63.37986, note: "Bass/pickerel/perch, east of Dartmouth", radiusKm: 2.3, bbox: [44.69972, -63.39134, 44.74014, -63.36839] },
+  { name: "Williams Lake", lat: 44.61929, lon: -63.59688, note: "Halifax, trout/bass, quiet shore fishing", radiusKm: 0.8, bbox: [44.61601, -63.60659, 44.62257, -63.58718] },
   // HRM city lakes (coords from the NS hatchery stocking dataset, UTM zone 20N)
-  { name: "Maynard Lake", lat: 44.67053, lon: -63.55246, note: "Dartmouth urban lake; stocked rainbow & brook trout, plus bass/perch; park, beach & trail access", radiusKm: 0.8 },
-  { name: "Penhorn Lake", lat: 44.67536, lon: -63.54066, note: "Dartmouth; stocked rainbow & brook trout; easy shore access off Portland St", radiusKm: 0.6 },
-  { name: "Oathill Lake", lat: 44.67387, lon: -63.55038, note: "Dartmouth; stocked brook trout; quiet residential lake", radiusKm: 0.5 },
-  { name: "Albro Lake", lat: 44.68681, lon: -63.57593, note: "Dartmouth; stocked rainbow & brook trout; urban shore fishing", radiusKm: 0.6 },
-  { name: "Kearney Lake", lat: 44.69629, lon: -63.69832, note: "Halifax/Bedford; stocked brook trout; beach & shoreline access", radiusKm: 1.0 },
-  { name: "Morris Lake", lat: 44.65152, lon: -63.49725, note: "Dartmouth/Cole Harbour; stocked brook trout; close to Eastern Passage", radiusKm: 1.0 },
-  { name: "Lewis Lake", lat: 44.92428, lon: -63.78007, note: "Tantallon area; stocked brook & rainbow trout; provincial park access", radiusKm: 1.2 },
-  { name: "Springfield Lake", lat: 44.81225, lon: -63.73994, note: "Middle Sackville; stocked brook trout; also bass & perch", radiusKm: 1.0 },
+  { name: "Maynard Lake", lat: 44.67053, lon: -63.55246, note: "Dartmouth urban lake; stocked rainbow & brook trout, plus bass/perch; park, beach & trail access", radiusKm: 0.8, bbox: [44.66782, -63.55597, 44.67348, -63.54885] },
+  { name: "Penhorn Lake", lat: 44.67536, lon: -63.54066, note: "Dartmouth; stocked rainbow & brook trout; easy shore access off Portland St", radiusKm: 0.6, bbox: [44.67374, -63.54272, 44.67705, -63.53837] },
+  { name: "Oathill Lake", lat: 44.67387, lon: -63.55038, note: "Dartmouth; stocked brook trout; quiet residential lake", radiusKm: 0.5, bbox: [44.67184, -63.55236, 44.67587, -63.54832] },
+  { name: "Albro Lake", lat: 44.68681, lon: -63.57593, note: "Dartmouth; stocked rainbow & brook trout; urban shore fishing", radiusKm: 0.6, bbox: [44.68562, -63.58034, 44.69342, -63.57268] },
+  { name: "Kearney Lake", lat: 44.69629, lon: -63.69832, note: "Halifax/Bedford; stocked brook trout; beach & shoreline access", radiusKm: 1.0, bbox: [44.68726, -63.70797, 44.7051, -63.68243] },
+  { name: "Morris Lake", lat: 44.65152, lon: -63.49725, note: "Dartmouth/Cole Harbour; stocked brook trout; close to Eastern Passage", radiusKm: 1.0, bbox: [44.63998, -63.51502, 44.66431, -63.48201] },
+  { name: "Lewis Lake", lat: 44.92428, lon: -63.78007, note: "Tantallon area; stocked brook & rainbow trout; provincial park access", radiusKm: 1.2, bbox: [44.91266, -63.78513, 44.93167, -63.77388] },
+  { name: "Springfield Lake", lat: 44.81225, lon: -63.73994, note: "Middle Sackville; stocked brook trout; also bass & perch", radiusKm: 1.0, bbox: [44.80477, -63.7461, 44.81978, -63.7336] },
 ];
 
 // Boatable/fishable waterway links live in ./waterways.ts (geometry from OpenStreetMap).

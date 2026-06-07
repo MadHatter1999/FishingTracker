@@ -1,7 +1,7 @@
 // Guild backend facade. Picks Firebase (Auth + Firestore) when Firebase config
 // is present, otherwise falls back to the self-hosted Node API. The Firebase
 // implementation is dynamically imported so its SDK stays in a separate chunk.
-import type { GuildUser } from "../types";
+import type { GuildUser, CatchRecord, MemberTrip } from "../types";
 
 export const useFirebase = Boolean(import.meta.env.VITE_FIREBASE_API_KEY && import.meta.env.VITE_FIREBASE_PROJECT_ID);
 
@@ -161,4 +161,21 @@ export async function resetUserPassword(id: string | number, newPassword: string
 export async function deleteUser(id: string | number): Promise<void> {
   if (useFirebase) return (await fb()).deleteUser(id);
   await apiNode(`/api/users/${id}`, { method: "DELETE" });
+}
+
+// ---- catch-log trip sync (Firebase only; no-op on the Node backend) ----
+export function tripsShared(): boolean {
+  return useFirebase;
+}
+export async function syncTripSave(trip: CatchRecord): Promise<void> {
+  if (!useFirebase) return;
+  try { await (await fb()).saveTrip(trip); } catch { /* offline / non-fatal */ }
+}
+export async function syncTripDelete(id: string): Promise<void> {
+  if (!useFirebase) return;
+  try { await (await fb()).deleteTrip(id); } catch { /* non-fatal */ }
+}
+export async function listAllTrips(): Promise<MemberTrip[]> {
+  if (!useFirebase) return [];
+  return (await fb()).listAllTrips();
 }

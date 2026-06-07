@@ -1,9 +1,9 @@
 // Admin-only "Members" panel: create / manage guild member accounts.
 import {
   listUsers, createUser, updateUser, resetUserPassword, deleteUser, setUserActive,
-  changeMyPassword, getCurrentUser, backendCaps,
+  changeMyPassword, getCurrentUser, backendCaps, listAllTrips,
 } from "../services/api";
-import type { GuildUser } from "../types";
+import type { GuildUser, MemberTrip } from "../types";
 
 const caps = backendCaps();
 
@@ -42,6 +42,13 @@ export function openAdminPanel(): void {
         <section class="admin-section">
           <h3>Members</h3>
           <div id="userlist" class="userlist"><p class="muted">Loading...</p></div>
+        </section>
+
+        <section class="admin-section">
+          <h3>Member trips &amp; notes</h3>
+          ${caps.mode === "firebase"
+            ? `<button class="btn small" id="loadtrips">Show all member trips</button><div id="alltrips" class="mt"></div>`
+            : `<p class="muted" style="font-size:13px">Viewing other members' trips needs the Firebase backend.</p>`}
         </section>
 
         <section class="admin-section">
@@ -213,5 +220,41 @@ export function openAdminPanel(): void {
     } catch (err) { status((err as Error).message, true); }
   });
 
+  // admin: load every member's trips & notes
+  const loadTripsBtn = overlay.querySelector("#loadtrips") as HTMLButtonElement | null;
+  if (loadTripsBtn) loadTripsBtn.onclick = async () => {
+    const box = overlay.querySelector("#alltrips") as HTMLElement;
+    loadTripsBtn.disabled = true;
+    loadTripsBtn.textContent = "Loading...";
+    try {
+      const trips = await listAllTrips();
+      box.innerHTML = renderTrips(trips);
+      loadTripsBtn.textContent = `Reload (${trips.length})`;
+    } catch (err) {
+      box.innerHTML = `<p class="login-error">${esc((err as Error).message)}</p>`;
+      loadTripsBtn.textContent = "Show all member trips";
+    }
+    loadTripsBtn.disabled = false;
+  };
+
   refresh();
+}
+
+function renderTrips(trips: MemberTrip[]): string {
+  if (!trips.length) return `<p class="muted" style="font-size:13px">No member trips logged yet.</p>`;
+  return `<div class="table-scroll"><table class="logtable">
+    <thead><tr><th>Member</th><th>Date</th><th>Time</th><th>Species</th><th>#</th><th>Kept</th><th>Notes</th></tr></thead>
+    <tbody>
+      ${trips.slice(0, 300).map((t) => `<tr>
+        <td><b>${esc(t.displayName ?? "")}</b></td>
+        <td>${esc(t.date ?? "")}</td>
+        <td>${esc((t.start ?? "") + (t.end ? "-" + t.end : ""))}</td>
+        <td>${esc(t.species ?? "")}</td>
+        <td>${t.count ?? ""}</td>
+        <td>${esc(t.kept ?? "")}</td>
+        <td class="notes">${esc(t.notes ?? "")}</td>
+      </tr>`).join("")}
+    </tbody>
+  </table></div>
+  ${trips.length > 300 ? `<div class="note-sm">Showing 300 of ${trips.length}.</div>` : ""}`;
 }
