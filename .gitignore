@@ -1,6 +1,6 @@
 # Dependencies
 node_modules/
-
+key.json
 # Build output
 dist/
 dist-ssr/
@@ -39,3 +39,4 @@ Thumbs.db
 *.suo
 *.njsproj
 *.sln
+.firebaserc

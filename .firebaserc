@@ -1,5 +1,8 @@
 {
   "projects": {
-    "default": "your-project-id"
-  }
+    "default": "nova-scotian-anglers",
+    "NSA": "nova-scotian-anglers"
+  },
+  "targets": {},
+  "etags": {}
 }

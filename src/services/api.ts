@@ -89,12 +89,18 @@ export async function login(username: string, password: string): Promise<GuildUs
   if (useFirebase) {
     user = await (await fb()).login(username, password);
   } else {
-    const { token, user: u } = await apiNode<{ token: string; user: GuildUser }>("/api/login", {
+    const resp = await apiNode<{ token: string; user: GuildUser }>("/api/login", {
       method: "POST",
       body: JSON.stringify({ username, password }),
     });
-    setToken(token);
-    user = u;
+    if (!resp || !resp.token) {
+      throw new Error(
+        "This build has no Firebase config, so it is using the local server, which is not running here. " +
+        "Add your VITE_FIREBASE_* values to .env.local, rebuild, and redeploy."
+      );
+    }
+    setToken(resp.token);
+    user = resp.user;
   }
   setCurrentUser(user);
   return user;
