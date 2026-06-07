@@ -2,6 +2,23 @@ import { SPECIES, FRESH_SPECIES, EURYHALINE_KEYS, type SpeciesDef } from "../con
 import type { Bundle, ScoredHour, SpeciesForecast } from "../types";
 import { localDateKey, windowsForRange } from "./score";
 import { fmtRange } from "../util/format";
+import { stockingSpeciesKey } from "../services/stocking";
+
+// How much a recent provincial stocking lifts a species' odds at this lake.
+// Returns { boost (>=1), note } for a species key, or null if not stocked here.
+function stockingBoost(bundle: Bundle, key: string): { boost: number; note: string } | null {
+  const st = bundle.stocking;
+  if (!st || !st.bySpecies.length) return null;
+  const match = st.bySpecies.find((s) => stockingSpeciesKey(s.species) === key);
+  if (!match) return null;
+  const weeks = (Date.now() - Date.parse(match.latest)) / (7 * 86400000);
+  const recency = weeks < 4 ? 1 : weeks < 12 ? 0.7 : weeks < 30 ? 0.4 : weeks < 80 ? 0.2 : 0.08;
+  const qty = Math.min(1, match.total / 2500); // bigger releases -> bigger bump
+  const boost = 1 + recency * (0.5 + 0.9 * qty); // up to ~2.3x when freshly, heavily stocked
+  const when = new Date(match.latest).toLocaleDateString("en-CA", { year: "numeric", month: "short", day: "numeric" });
+  const note = `Provincially stocked here: ${match.total.toLocaleString()} ${match.species.toLowerCase()} since 2018 (latest ${when}).`;
+  return { boost, note };
+}
 
 function dayHours(bundle: Bundle, date: Date) {
   const key = localDateKey(date);
@@ -58,7 +75,10 @@ export function forecastSpecies(bundle: Bundle, scored: ScoredHour[], date: Date
     const tf = tempFactor(water, def);
     // sea fish only reach the brackish interface intermittently -> damp their odds
     const brackishDamp = brackishKeys.has(def.key) ? 0.5 : 1;
-    const encounter = clampPct(def.baseEncounter * sf * (0.4 + 0.6 * tf) * brackishDamp);
+    // recent provincial stocking strongly raises encounter odds for stocked trout
+    const stock = stockingBoost(bundle, def.key);
+    const stockBoost = stock ? stock.boost : 1;
+    const encounter = clampPct(def.baseEncounter * sf * (0.4 + 0.6 * tf) * brackishDamp * stockBoost);
 
     // condition alignment: blend the day's best window strength with species' bias
     const condBase = peakScore / 10;
@@ -87,7 +107,8 @@ export function forecastSpecies(bundle: Bundle, scored: ScoredHour[], date: Date
       eating: def.eating,
       legal: def.legal,
       legalFlag: def.legalFlag,
-      notes: def.notes,
+      notes: stock ? `${stock.note} ${def.notes}` : def.notes,
+      stocked: !!stock,
     };
   });
 

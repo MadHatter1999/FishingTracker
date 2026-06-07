@@ -63,6 +63,10 @@ The frontend speaks to one of two interchangeable backends, chosen automatically
   wave height, sea-surface temperature, sunrise/sunset).
 - **Moon phase / spring-neap strength** - computed locally.
 - **Tagged ocean predators** - **OCEARCH** named, satellite-tagged animals (via the public Mapotic feed).
+- **Lake stocking** - **Nova Scotia open data** "Fish Hatchery Stocking Records" (trout/salmon releases by
+  waterbody, matched to each lake by name + location). Freshwater lakes show which species are stocked,
+  how many and when, and stocked species are boosted in the forecast. Always verify the current
+  [NS weekly stocking update](https://novascotia.ca/fish/sportfishing/hatchery-stocking/stocking-update/).
 
 ## Deploy to Firebase (free, recommended)
 

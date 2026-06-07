@@ -102,6 +102,18 @@ async function main() {
   if (!pSpecies.some((n) => /striped bass|mackerel|smelt|gaspereau|shad|flounder/i.test(n))) throw new Error("Brackish lake should include some sea fish");
   if (bSpecies.some((n) => /mackerel|pollock|cod|striped bass|herring/i.test(n))) throw new Error("Pure lake must NOT show open-sea fish");
 
+  // provincial stocking (NS open data): a stocked HRM lake vs a wild one
+  const maynard = LAKES.find((l) => l.name === "Maynard Lake")!;
+  const mb = await loadBundle(maynard, 2);
+  const st = mb.stocking;
+  console.log(`\nstocking Maynard Lake: match=${st?.waterbody ?? "none"} latest=${st?.latest ?? "-"}`);
+  if (st) console.log("  " + st.bySpecies.map((s) => `${s.species} x${s.total}`).join(" | "));
+  console.log("Lake Banook stocking:", bb.stocking ? `MATCH ${bb.stocking.waterbody}` : "none (expected - wild lake)");
+  if (!st || !st.bySpecies.some((s) => /trout/i.test(s.species))) throw new Error("Maynard Lake should show stocked trout");
+  const mSpecies = computeDay(mb, computeScores(mb), [], today).species;
+  if (!mSpecies.some((s) => s.stocked)) throw new Error("Maynard forecast should flag a stocked species");
+  console.log("  Maynard stocked species in forecast:", mSpecies.filter((s) => s.stocked).map((s) => s.name).join(", "));
+
   console.log("\nSMOKE TEST PASSED ✅");
 }
 

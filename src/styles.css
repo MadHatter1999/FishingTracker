@@ -97,6 +97,7 @@ h1, h2, h3 { margin: 0; }
 /* score gauge */
 .gauge-wrap { display: flex; align-items: center; gap: 18px; }
 .gauge { position: relative; width: 132px; height: 132px; flex: 0 0 auto; }
+.gauge svg { display: block; width: 100%; height: 100%; }
 .gauge .num { position: absolute; inset: 0; display: grid; place-items: center; flex-direction: column; }
 .gauge .num b { font-size: 34px; line-height: 1; }
 .gauge .num span { color: var(--muted); font-size: 12px; }
@@ -261,3 +262,93 @@ label.field.wide { grid-column: 1 / -1; }
 .admin-status { border-radius: 9px; padding: 8px 12px; font-size: 13px; margin-bottom: 14px; }
 .admin-status.ok { background: rgba(94,224,160,.12); border: 1px solid rgba(94,224,160,.4); color: var(--good); }
 .admin-status.bad { background: rgba(255,107,107,.12); border: 1px solid rgba(255,107,107,.4); color: var(--bad); }
+
+/* ============================================================
+   MOBILE (phones only, <= 600px). Tablet (768px) & desktop are
+   left exactly as-is; this layer only kicks in on small screens.
+   ============================================================ */
+@media (max-width: 600px) {
+  /* edge padding + notch / home-bar safe areas */
+  #app {
+    padding:
+      calc(12px + env(safe-area-inset-top, 0px))
+      max(12px, env(safe-area-inset-right, 0px))
+      calc(24px + env(safe-area-inset-bottom, 0px))
+      max(12px, env(safe-area-inset-left, 0px));
+  }
+
+  /* iOS zooms the page when a focused field is < 16px - stop that */
+  input, select, textarea { font-size: 16px; }
+
+  /* Header: stack, full-width picker, controls wrap underneath */
+  .app-header { gap: 10px; margin-bottom: 12px; }
+  .brand { gap: 10px; }
+  .brand .logo { width: 34px; height: 34px; }
+  .brand h1 { font-size: 18px; }
+  .brand .sub { font-size: 11px; line-height: 1.35; }
+  .header-actions { width: 100%; margin-left: 0; gap: 8px; flex-wrap: wrap; }
+  .locpicker { flex: 1 1 100%; max-width: none; width: 100%; padding: 11px 12px; }
+
+  /* Account bar: chip on its own row, buttons centred at natural width */
+  .account-bar { justify-content: center; }
+  .acct-chip { flex: 1 1 100%; justify-content: center; }
+  .account-bar > .btn:last-child { margin-left: 0; }
+
+  /* Conditions: two clean columns */
+  .cond-strip { grid-template-columns: repeat(2, 1fr); gap: 8px; margin-bottom: 12px; }
+  .cond { padding: 9px 10px; }
+  .cond .v { font-size: 16px; }
+
+  /* Day selector: slightly tighter (still horizontally scrollable) */
+  .daybar { gap: 6px; }
+  .daychip { min-width: 72px; padding: 7px 9px; }
+
+  /* Tabs: one swipeable row instead of wrapping to several lines */
+  .tabs { flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch; gap: 4px; scrollbar-width: none; }
+  .tabs::-webkit-scrollbar { display: none; }
+  .tab { white-space: nowrap; flex: 0 0 auto; padding: 8px 12px; }
+
+  /* Cards + bigger tap targets */
+  .card { padding: 13px; }
+  .grid { gap: 12px; }
+  .btn { padding: 10px 14px; }
+  .btn.small { padding: 8px 12px; font-size: 13px; }
+
+  /* Score gauge: stack it, centred, with the score details beneath */
+  .gauge-wrap { flex-direction: column; align-items: center; gap: 12px; }
+  .gauge { width: 128px; height: 128px; }
+  .gauge .num b { font-size: 32px; }
+  .score-meta { flex: none; width: 100%; }
+
+  /* Bars: narrower label column so the bar has room */
+  .barrow { grid-template-columns: 84px 1fr 40px; gap: 8px; }
+  .barrow .lbl { font-size: 12px; }
+
+  /* One column for species cards; compact two-up for tactics k/v + log form */
+  .species-grid { grid-template-columns: 1fr; gap: 12px; }
+  .kvbig { grid-template-columns: 104px 1fr; gap: 6px 10px; }
+  .form-grid { grid-template-columns: 1fr 1fr; gap: 9px; }
+
+  /* Hotspots: smaller rank/score columns */
+  .spot { grid-template-columns: 30px 1fr 48px; gap: 10px; padding: 10px; }
+  .spot .rk, .spot .sc { font-size: 18px; }
+
+  /* Map a touch shorter on phones */
+  .mapcanvas { height: 340px; }
+
+  /* Admin / Members modal: near full-screen, single-column form */
+  .modal { max-width: 100%; max-height: 94vh; }
+  .admin-form { gap: 8px; }
+  .admin-form .field { flex: 1 1 100%; }
+  .admin-form .field input[type="text"], .admin-form .field input[type="password"] { min-width: 0; width: 100%; }
+  .admin-form > .btn { width: 100%; }
+  .userrow { gap: 8px; }
+  .userrow .btn { flex: 1 1 auto; }
+
+  .login-card { padding: 24px 18px; }
+}
+
+@media (max-width: 360px) {
+  .brand h1 { font-size: 17px; }
+  .daychip { min-width: 66px; }
+}

@@ -579,6 +579,15 @@ export const NS_LAKES: { name: string; lat: number; lon: number; note: string; r
   { name: "Shubenacadie Grand Lake", lat: 44.90942, lon: -63.60049, note: "Major lake on the Shubenacadie system, boatable to Fundy; bass/perch/pickerel", radiusKm: 4 },
   { name: "Lake Echo", lat: 44.71993, lon: -63.37986, note: "Bass/pickerel/perch, east of Dartmouth", radiusKm: 2.3 },
   { name: "Williams Lake", lat: 44.61929, lon: -63.59688, note: "Halifax, trout/bass, quiet shore fishing", radiusKm: 0.8 },
+  // HRM city lakes (coords from the NS hatchery stocking dataset, UTM zone 20N)
+  { name: "Maynard Lake", lat: 44.67053, lon: -63.55246, note: "Dartmouth urban lake; stocked rainbow & brook trout, plus bass/perch; park, beach & trail access", radiusKm: 0.8 },
+  { name: "Penhorn Lake", lat: 44.67536, lon: -63.54066, note: "Dartmouth; stocked rainbow & brook trout; easy shore access off Portland St", radiusKm: 0.6 },
+  { name: "Oathill Lake", lat: 44.67387, lon: -63.55038, note: "Dartmouth; stocked brook trout; quiet residential lake", radiusKm: 0.5 },
+  { name: "Albro Lake", lat: 44.68681, lon: -63.57593, note: "Dartmouth; stocked rainbow & brook trout; urban shore fishing", radiusKm: 0.6 },
+  { name: "Kearney Lake", lat: 44.69629, lon: -63.69832, note: "Halifax/Bedford; stocked brook trout; beach & shoreline access", radiusKm: 1.0 },
+  { name: "Morris Lake", lat: 44.65152, lon: -63.49725, note: "Dartmouth/Cole Harbour; stocked brook trout; close to Eastern Passage", radiusKm: 1.0 },
+  { name: "Lewis Lake", lat: 44.92428, lon: -63.78007, note: "Tantallon area; stocked brook & rainbow trout; provincial park access", radiusKm: 1.2 },
+  { name: "Springfield Lake", lat: 44.81225, lon: -63.73994, note: "Middle Sackville; stocked brook trout; also bass & perch", radiusKm: 1.0 },
 ];
 
 // Boatable/fishable waterway links live in ./waterways.ts (geometry from OpenStreetMap).

@@ -187,7 +187,18 @@ function render() {
     <div id="tabbody">${renderTab(b, ctx)}</div>
   `;
   bind();
+  scrollActiveTabIntoView();
   postRender();
+}
+
+// On phones the tab bar is a single swipeable row; after a re-render keep the
+// active tab centred (horizontal scroll only - never moves the page).
+function scrollActiveTabIntoView() {
+  const active = document.querySelector(".tabs .tab.active") as HTMLElement | null;
+  const strip = active?.parentElement;
+  if (!active || !strip) return;
+  if (strip.scrollWidth <= strip.clientWidth) return; // not overflowing (desktop/tablet)
+  strip.scrollTo({ left: active.offsetLeft - strip.clientWidth / 2 + active.offsetWidth / 2, behavior: "smooth" });
 }
 
 async function postRender() {
@@ -577,7 +588,32 @@ function tabSpecies(b: Bundle, ctx: DayContext): string {
     </div>
     <div class="note-sm">* "KEEP" still requires you to verify current DFO Maritimes / NS Anglers' Handbook seasons, size/slot limits and licences. When in doubt, release.</div>
   </div>
-  ${fresh ? "" : predatorPanel(b)}`;
+  ${fresh ? stockingPanel(b) : predatorPanel(b)}`;
+}
+
+function stockingPanel(b: Bundle): string {
+  const st = b.stocking;
+  const fmtD = (d: string | null) => (d ? new Date(d).toLocaleDateString("en-CA", { year: "numeric", month: "short", day: "numeric" }) : "-");
+  const links = `<a href="https://data.novascotia.ca/d/8e4a-m6fw" target="_blank" rel="noopener">Source: NS open data →</a> · <a href="https://novascotia.ca/fish/sportfishing/hatchery-stocking/stocking-update/" target="_blank" rel="noopener">Weekly stocking update →</a>`;
+  if (!st || !st.bySpecies.length) {
+    return `<div class="card mt">
+      <h2>🐟 Provincial Stocking</h2>
+      <p class="muted" style="font-size:13px;margin:0 0 8px">No NS hatchery stocking records found within ~3.5 km of ${esc(b.location.name)} (since 2018). Plenty of NS lakes hold wild trout, bass and pickerel without being stocked.</p>
+      <div class="note-sm">${links}</div>
+    </div>`;
+  }
+  return `<div class="card mt">
+    <h2>🐟 Provincial Stocking ${st.recentlyStocked ? `<span class="legalflag lf-keep">recently stocked</span>` : ""}</h2>
+    <p class="muted" style="font-size:13px;margin:0 0 10px">Nearest match in the NS Fish Hatchery Stocking Records: <b>${esc(st.waterbody)}</b> · latest release <b>${fmtD(st.latest)}</b>. Stocked species are boosted in the forecast above. NS inland fishing needs a provincial licence, verify seasons & limits.</p>
+    <div class="note-sm flex" style="flex-wrap:wrap;gap:8px;margin-bottom:6px">
+      ${st.bySpecies.map((s) => `<span class="badge live">${esc(s.species)} · ${s.total.toLocaleString()} since 2018 · latest ${fmtD(s.latest)}</span>`).join("")}
+    </div>
+    <div class="table-scroll"><table class="logtable">
+      <thead><tr><th>Date</th><th>Species</th><th>Number released</th></tr></thead>
+      <tbody>${st.records.slice(0, 10).map((r) => `<tr><td>${fmtD(r.date)}</td><td>${esc(r.species)}</td><td>${r.number.toLocaleString()}</td></tr>`).join("")}</tbody>
+    </table></div>
+    <div class="note-sm">${links}</div>
+  </div>`;
 }
 
 function predatorPanel(b: Bundle): string {
@@ -616,7 +652,7 @@ function spCard(sp: import("../types").SpeciesForecast): string {
   return `<div class="sp">
     <div class="sp-head">
       <span class="sp-emoji">${sp.emoji}</span>
-      <span class="sp-name">${sp.name}</span>
+      <span class="sp-name">${sp.name}${sp.stocked ? ` <span class="legalflag lf-keep" title="Recently stocked by the NS hatchery program">stocked</span>` : ""}</span>
       <span class="sp-eat">🍽 ${sp.eating}/10</span>
     </div>
     ${barRow("Encounter", sp.encounter)}

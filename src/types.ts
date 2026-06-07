@@ -78,6 +78,21 @@ export interface SpeciesForecast {
   legal: string; // retention note
   legalFlag: "keep" | "release" | "check";
   notes: string;
+  stocked?: boolean; // recently stocked here (NS hatchery program)
+}
+
+// Provincial fish-stocking history for a waterbody (NS open data).
+export interface StockingEntry {
+  species: string;
+  number: number;
+  date: string; // yyyy-mm-dd
+}
+export interface StockingInfo {
+  waterbody: string; // matched dataset name
+  records: StockingEntry[]; // recent, newest first
+  bySpecies: { species: string; total: number; latest: string }[];
+  latest: string | null; // ISO date of most recent stocking
+  recentlyStocked: boolean; // within ~12 weeks
 }
 
 export interface Hotspot {
@@ -173,6 +188,7 @@ export interface Bundle {
   tide: TideData;
   astro: DayAstro[];
   predators: TaggedAnimal[]; // named tagged animals (OCEARCH)
+  stocking?: StockingInfo | null; // provincial stocking history (freshwater)
   fetchedAt: Date;
   warnings: string[];
 }
