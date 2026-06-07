@@ -1,0 +1,18 @@
+{
+  "name": "Nova Scotian Anglers Guild",
+  "short_name": "NS Anglers",
+  "description": "Nova Scotia shore-fishing analyst, catch log, and live guild map.",
+  "id": "/",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#07111c",
+  "theme_color": "#0a1622",
+  "categories": ["sports", "weather", "utilities"],
+  "icons": [
+    { "src": "/fishing.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/fishing.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/fishing.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "name": "nsag-guild-server",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Nova Scotian Anglers Guild - auth + live presence backend (Node + SQLite)",
+  "scripts": {
+    "start": "node --no-warnings=ExperimentalWarning index.js",
+    "dev": "node --no-warnings=ExperimentalWarning --watch index.js"
+  },
+  "engines": {
+    "node": ">=22.5"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}

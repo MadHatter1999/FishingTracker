@@ -1,0 +1,41 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+dist-ssr/
+dist-smoke.mjs
+
+# Vite / TS cache
+.vite/
+*.tsbuildinfo
+
+# Env & secrets (keep the example template)
+.env
+.env.*
+!.env.example
+*.local
+serviceAccountKey.json
+
+# Firebase
+.firebase/
+firebase-debug.log
+firestore-debug.log
+ui-debug.log
+
+# Self-hosted Node server runtime data (SQLite db + signing secret)
+server/data/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.suo
+*.njsproj
+*.sln
