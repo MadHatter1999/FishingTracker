@@ -20,7 +20,7 @@ export interface MapApi {
 // Remember which base + overlay layers the user had on, so they survive the
 // map being torn down and remounted when a new location loads.
 interface LayerPrefs { base: string; overlays: string[]; }
-const LAYER_KEY = "mccormacks.maplayers.v3";
+const LAYER_KEY = "mccormacks.maplayers.v4";
 function loadLayerPrefs(): LayerPrefs | null {
   try {
     const raw = localStorage.getItem(LAYER_KEY);
@@ -148,10 +148,17 @@ export function mountMap(opts: MountOpts): MapApi {
   }
   renderPresence(presence, selfId);
 
+  // --- saltwater (tide-station) + freshwater (lake) spot markers, each its own
+  //     toggleable layer so the angler can hide them and see the whole map ---
+  const saltLayer = L.layerGroup();
+  const freshLayer = L.layerGroup();
+
   // --- layers control with persisted on/off state ---
   const bases: Record<string, L.Layer> = { "Street (OSM)": osm, "Topographic": topo };
   const overlays: Record<string, L.Layer> = {
     "Guild members": memberLayer,
+    "Saltwater spots": saltLayer,
+    "Freshwater spots": freshLayer,
     "Sea charts / depths": seamarks,
     "Bathymetry (GEBCO)": gebco,
     "Waterway links": waterLayer,
@@ -164,8 +171,8 @@ export function mountMap(opts: MountOpts): MapApi {
   const onOverlays = prefs
     ? prefs.overlays
     : active.kind === "fresh"
-    ? ["Guild members", "Waterway links"]
-    : ["Guild members", "Sea charts / depths", "Waterway links", "Ocean predators"];
+    ? ["Guild members", "Waterway links", "Saltwater spots", "Freshwater spots"]
+    : ["Guild members", "Sea charts / depths", "Waterway links", "Ocean predators", "Saltwater spots", "Freshwater spots"];
   for (const name of Object.keys(overlays)) if (onOverlays.includes(name)) overlays[name].addTo(map);
 
   L.control.layers(bases, overlays, { collapsed: true }).addTo(map);
@@ -177,15 +184,15 @@ export function mountMap(opts: MountOpts): MapApi {
   };
   map.on("overlayadd overlayremove baselayerchange", savePrefs);
 
-  // --- location markers ---
+  // --- location markers (grouped into the salt / fresh toggle layers) ---
   for (const loc of locations) {
     if (loc.home || loc.saved) continue;
     if (loc.kind === "fresh") {
-      const m = L.circleMarker([loc.lat, loc.lon], { radius: 6, color: "#0c1a2b", weight: 1, fillColor: "#7ce0a0", fillOpacity: 0.95 }).addTo(map);
+      const m = L.circleMarker([loc.lat, loc.lon], { radius: 6, color: "#0c1a2b", weight: 1, fillColor: "#7ce0a0", fillOpacity: 0.95 }).addTo(freshLayer);
       m.bindTooltip(`🟢 ${loc.name} (lake)`, { direction: "top" });
       m.on("click", () => onSelect(loc));
     } else {
-      const m = L.circleMarker([loc.lat, loc.lon], { radius: 5, color: "#0c1a2b", weight: 1, fillColor: "#36c2ce", fillOpacity: 0.9 }).addTo(map);
+      const m = L.circleMarker([loc.lat, loc.lon], { radius: 5, color: "#0c1a2b", weight: 1, fillColor: "#36c2ce", fillOpacity: 0.9 }).addTo(saltLayer);
       m.bindTooltip(loc.name, { direction: "top" });
       m.on("click", () => onSelect(loc));
     }

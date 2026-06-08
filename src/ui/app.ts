@@ -474,7 +474,7 @@ function tabMap(b: Bundle): string {
       <span style="color:#5ad1ff">━ boatable link</span>
       <span style="color:#7ce0a0">┄ fishable link</span>
     </div>
-    <p class="note-sm">Your own <b>live position</b> dot follows you for orientation while the Map tab is open, whether or not you're sharing. Tap <b>📍 Find me</b> to recentre. Turn on <b>📡 Share location</b> (top of the page) to also let the guild see your position live. Toggle <b>Guild members</b>, <b>Sea charts / depths</b>, <b>Bathymetry</b> and <b>Waterway links</b> with the layers control (top-right of the map).</p>
+    <p class="note-sm">Your own <b>live position</b> dot follows you for orientation while the Map tab is open, whether or not you're sharing. Tap <b>📍 Find me</b> to recentre. Turn on <b>📡 Share location</b> (top of the page) to also let the guild see your position live. Use the layers control (top-right of the map) to toggle Saltwater spots, Freshwater spots, Guild members, Sea charts / depths, Bathymetry and Waterway links; turn off the spot layers to see the whole map.</p>
     ${savedSpotsList()}
   </div>`;
 }

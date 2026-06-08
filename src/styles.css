@@ -98,7 +98,7 @@ h1, h2, h3 { margin: 0; }
 .gauge-wrap { display: flex; align-items: center; gap: 18px; }
 .gauge { position: relative; width: 132px; height: 132px; flex: 0 0 auto; }
 .gauge svg { display: block; width: 100%; height: 100%; }
-.gauge .num { position: absolute; inset: 0; display: grid; place-items: center; flex-direction: column; }
+.gauge .num { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; }
 .gauge .num b { font-size: 34px; line-height: 1; }
 .gauge .num span { color: var(--muted); font-size: 12px; }
 .score-meta { flex: 1; }
@@ -163,8 +163,9 @@ h1, h2, h3 { margin: 0; }
 
 /* form */
 .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
-label.field { display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; color: var(--muted); }
+label.field { display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; color: var(--muted); min-width: 0; }
 label.field input, label.field select, label.field textarea {
+  width: 100%; min-width: 0; box-sizing: border-box;
   background: var(--bg2); border: 1px solid var(--line); color: var(--text); border-radius: 9px; padding: 8px 10px; font-size: 14px; font-family: inherit;
 }
 label.field textarea { min-height: 64px; resize: vertical; }
@@ -309,10 +310,27 @@ label.field.wide { grid-column: 1 / -1; }
   .tab { white-space: nowrap; flex: 0 0 auto; padding: 8px 12px; }
 
   /* Cards + bigger tap targets */
-  .card { padding: 13px; }
+  .card { padding: 13px; overflow-x: hidden; }
   .grid { gap: 12px; }
   .btn { padding: 10px 14px; }
   .btn.small { padding: 8px 12px; font-size: 13px; }
+
+  /* Let inline rows (button groups, form footer, card headers) wrap instead of
+     spilling past the card edge. .tabs opts back out to stay a swipe strip. */
+  .flex { flex-wrap: wrap; }
+  .tabs { flex-wrap: nowrap; }
+  .form-grid, #logform { min-width: 0; }
+  /* date/time inputs ignore width:100% on iOS/WebKit and size to content, which
+     overruns the card; strip the native appearance so they match the others. */
+  label.field input[type="date"], label.field input[type="time"], label.field input[type="number"] {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+  }
+  label.field input[type="date"]::-webkit-date-and-time-value,
+  label.field input[type="time"]::-webkit-date-and-time-value { text-align: left; }
 
   /* Score gauge: stack it, centred, with the score details beneath */
   .gauge-wrap { flex-direction: column; align-items: center; gap: 12px; }
@@ -324,10 +342,11 @@ label.field.wide { grid-column: 1 / -1; }
   .barrow { grid-template-columns: 84px 1fr 40px; gap: 8px; }
   .barrow .lbl { font-size: 12px; }
 
-  /* One column for species cards; compact two-up for tactics k/v + log form */
+  /* One column on phones for species cards, tactics k/v, and the log form */
   .species-grid { grid-template-columns: 1fr; gap: 12px; }
   .kvbig { grid-template-columns: 104px 1fr; gap: 6px 10px; }
-  .form-grid { grid-template-columns: 1fr 1fr; gap: 9px; }
+  .form-grid { grid-template-columns: 1fr; gap: 10px; }
+  label.field { font-size: 13px; }
 
   /* Hotspots: smaller rank/score columns */
   .spot { grid-template-columns: 30px 1fr 48px; gap: 10px; padding: 10px; }
