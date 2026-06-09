@@ -3,6 +3,7 @@ import "leaflet/dist/leaflet.css";
 import type { FishingLocation } from "../types";
 import { locationForPoint, HOME } from "../services/locations";
 import { WATERWAYS } from "../waterways";
+import { createFlowLayer, type TidalFlow } from "./flow";
 import type { TaggedAnimal, AnglerPresence } from "../types";
 
 export interface MapApi {
@@ -12,15 +13,31 @@ export interface MapApi {
   setPresence(anglers: AnglerPresence[], selfId?: string | number): void;
   setSelfLocation(lat: number, lon: number, accuracy?: number): void;
   clearSelfLocation(): void;
+  setFlow(flow: TidalFlow | null): void;
   centerOnSelf(): boolean;
   resize(): void;
   destroy(): void;
 }
 
+// NASA GIBS ocean layers (free, no key, CORS *). MUR SST and PACE OCI
+// chlorophyll are 1km daily fields published ~1 day behind, served as
+// GoogleMapsCompatible_Level7 PNG tiles. WMTS REST order is {z}/{row}/{col}.
+const GIBS = "https://gibs.earthdata.nasa.gov/wmts/epsg3857/best";
+function gibsDate(daysBack: number): string {
+  // step back a couple of days so the most-recent tile is always published
+  return new Date(Date.now() - daysBack * 86400000).toISOString().slice(0, 10);
+}
+function gibsLayer(layerId: string, attribution: string): L.TileLayer {
+  return L.tileLayer(
+    `${GIBS}/${layerId}/default/{time}/GoogleMapsCompatible_Level7/{z}/{y}/{x}.png`,
+    { time: gibsDate(2), maxNativeZoom: 7, maxZoom: 19, opacity: 0.72, attribution } as unknown as L.TileLayerOptions,
+  );
+}
+
 // Remember which base + overlay layers the user had on, so they survive the
 // map being torn down and remounted when a new location loads.
 interface LayerPrefs { base: string; overlays: string[]; }
-const LAYER_KEY = "mccormacks.maplayers.v4";
+const LAYER_KEY = "mccormacks.maplayers.v5";
 function loadLayerPrefs(): LayerPrefs | null {
   try {
     const raw = localStorage.getItem(LAYER_KEY);
@@ -41,6 +58,7 @@ interface MountOpts {
   presence?: AnglerPresence[];
   selfId?: string | number;
   selfColor?: string;
+  flow?: TidalFlow | null;
   onSelect: (loc: FishingLocation) => void;
   onRemoveSaved: (id: string) => void;
 }
@@ -71,7 +89,7 @@ function animalPopup(a: TaggedAnimal): string {
 }
 
 export function mountMap(opts: MountOpts): MapApi {
-  const { container, locations, active, predators = [], presence = [], selfId, selfColor = "#36c2ce", onSelect, onRemoveSaved } = opts;
+  const { container, locations, active, predators = [], presence = [], selfId, selfColor = "#36c2ce", flow = null, onSelect, onRemoveSaved } = opts;
 
   const map = L.map(container, { zoomControl: true }).setView([active.lat, active.lon], active.home ? 12 : active.kind === "fresh" ? 13 : 10);
 
@@ -90,6 +108,16 @@ export function mountMap(opts: MountOpts): MapApi {
     opacity: 0.55,
     attribution: "GEBCO bathymetry",
   } as L.WMSOptions);
+
+  // --- ocean-colour / temperature overlays (NASA GIBS) ---
+  // SST shows temperature breaks where bass/mackerel stack; chlorophyll shows
+  // productive green water (plankton -> baitfish -> predators).
+  const sst = gibsLayer("GHRSST_L4_MUR_Sea_Surface_Temperature", "SST: NASA GIBS / GHRSST MUR");
+  const chlorophyll = gibsLayer("OCI_PACE_Chlorophyll_a", "Chlorophyll: NASA GIBS / PACE OCI");
+
+  // --- animated tidal-flow overlay (modelled from the live tide phase) ---
+  const flowLayer = createFlowLayer();
+  flowLayer.setFlow(flow);
 
   // --- waterway links overlay ---
   const waterLayer = L.layerGroup();
@@ -157,6 +185,9 @@ export function mountMap(opts: MountOpts): MapApi {
   const bases: Record<string, L.Layer> = { "Street (OSM)": osm, "Topographic": topo };
   const overlays: Record<string, L.Layer> = {
     "Guild members": memberLayer,
+    "Tidal flow (animated)": flowLayer,
+    "Sea temp (SST)": sst,
+    "Chlorophyll": chlorophyll,
     "Saltwater spots": saltLayer,
     "Freshwater spots": freshLayer,
     "Sea charts / depths": seamarks,
@@ -172,7 +203,7 @@ export function mountMap(opts: MountOpts): MapApi {
     ? prefs.overlays
     : active.kind === "fresh"
     ? ["Guild members", "Waterway links", "Saltwater spots", "Freshwater spots"]
-    : ["Guild members", "Sea charts / depths", "Waterway links", "Ocean predators", "Saltwater spots", "Freshwater spots"];
+    : ["Guild members", "Tidal flow (animated)", "Sea charts / depths", "Waterway links", "Ocean predators", "Saltwater spots", "Freshwater spots"];
   for (const name of Object.keys(overlays)) if (onOverlays.includes(name)) overlays[name].addTo(map);
 
   L.control.layers(bases, overlays, { collapsed: true }).addTo(map);
@@ -183,6 +214,33 @@ export function mountMap(opts: MountOpts): MapApi {
     saveLayerPrefs({ base, overlays: on });
   };
   map.on("overlayadd overlayremove baselayerchange", savePrefs);
+
+  // --- flow legend (only visible while the animated tidal-flow layer is on) ---
+  const flowLegend = new L.Control({ position: "bottomleft" });
+  flowLegend.onAdd = () => {
+    const d = L.DomUtil.create("div", "flow-legend");
+    d.style.cssText = "background:rgba(8,20,32,.78);color:#dbe7f0;padding:6px 9px;border-radius:8px;font:11px/1.35 system-ui,sans-serif;box-shadow:0 1px 6px rgba(0,0,0,.4);pointer-events:none";
+    d.innerHTML =
+      `<b>Tidal flow</b> <span style="opacity:.65">(modelled)</span><br>` +
+      `<span style="display:inline-block;width:12px;height:3px;background:#5ce4f5;vertical-align:middle;margin-right:3px"></span>flooding` +
+      `<span style="display:inline-block;width:12px;height:3px;background:#ffb066;vertical-align:middle;margin:0 3px 0 7px"></span>ebbing<br>` +
+      `<span style="opacity:.65">longer streaks = stronger</span>`;
+    return d;
+  };
+  const syncFlowLegend = () => { if (map.hasLayer(flowLayer)) flowLegend.addTo(map); else flowLegend.remove(); };
+  map.on("overlayadd overlayremove", syncFlowLegend);
+  syncFlowLegend();
+
+  // SST + chlorophyll are coarse (~1km) ocean-scale fields - great zoomed out for
+  // spotting breaks, but ugly low-res blocks zoomed in. Fade them out smoothly as
+  // you zoom past ~z10.5 so close-up views stay clean.
+  const fadeOceanOverlays = () => {
+    const f = Math.max(0, Math.min(1, (12.5 - map.getZoom()) / 2));
+    sst.setOpacity(0.72 * f);
+    chlorophyll.setOpacity(0.72 * f);
+  };
+  map.on("zoomend overlayadd", fadeOceanOverlays);
+  fadeOceanOverlays();
 
   // --- location markers (grouped into the salt / fresh toggle layers) ---
   for (const loc of locations) {
@@ -276,6 +334,7 @@ export function mountMap(opts: MountOpts): MapApi {
     setPresence: (anglers, self) => renderPresence(anglers, self),
     setSelfLocation: (lat, lon, accuracy) => setSelf(lat, lon, accuracy),
     clearSelfLocation: () => clearSelf(),
+    setFlow: (f) => flowLayer.setFlow(f),
     centerOnSelf: () => {
       if (!selfLatLng) return false;
       map.flyTo(selfLatLng, Math.max(map.getZoom(), 14));

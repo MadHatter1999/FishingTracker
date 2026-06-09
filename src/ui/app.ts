@@ -2,6 +2,7 @@ import "../styles.css";
 import { loadBundle } from "../data";
 import { computeScores, overallScoreForDay, localDateKey } from "../engine/score";
 import { computeDay, type DayContext } from "../engine/context";
+import { tideVelocityAt } from "../engine/merge";
 import { generateBriefing } from "../engine/briefing";
 import { tideChartSVG, gaugeSVG, scoreColor } from "./charts";
 import { loadLog, addRecord, deleteRecord, newId, seedSamples, exportJSON, importJSON } from "../store/log";
@@ -9,6 +10,7 @@ import { SPECIES, FRESH_SPECIES, weatherLabel, compassDir } from "../config";
 import { loadNSLocations, getActiveLocation, setActiveLocation, locationForPoint, HOME } from "../services/locations";
 import { loadSpots, addSpot, removeSpot } from "../store/spots";
 import type { MapApi } from "./map";
+import type { TidalFlow } from "./flow";
 import { moonEmoji, moonInfo } from "../services/astronomy";
 import { fmtTime, fmtRange, fmtWeekday, fmtDate } from "../util/format";
 import type { Bundle, ScoredHour, CatchRecord, HourPoint, FishingLocation, GuildUser, AnglerPresence } from "../types";
@@ -258,6 +260,25 @@ function scrollActiveTabIntoView() {
   strip.scrollTo({ left: active.offsetLeft - strip.clientWidth / 2 + active.offsetWidth / 2, behavior: "smooth" });
 }
 
+// Indicative tidal-stream axis for the Halifax approaches: flood sets up-harbour
+// to the NW, ebb runs back out to the SE. Used only to orient the animated flow.
+const FLOOD_BEARING_DEG = 305;
+const EBB_BEARING_DEG = 125;
+
+// Turn the live tide curve into a flood/ebb flow for the animated map layer.
+// Magnitude and the flood<->ebb reversal are real; the bearing is the axis above.
+function tidalFlowNow(): TidalFlow | null {
+  const tide = state.bundle?.tide;
+  if (!tide || state.location.kind !== "salt") return null;
+  const v = tideVelocityAt(tide, new Date()); // m/h signed (+rising = flood)
+  if (v == null) return null;
+  const range = tide.meanRange || 1;
+  const speed01 = Math.max(0, Math.min(1, Math.abs(v) / (0.5 * range)));
+  const slack = 0.06 * range;
+  const phase: TidalFlow["phase"] = Math.abs(v) < slack ? "slack" : v > 0 ? "flood" : "ebb";
+  return { speed01, phase, bearingDeg: phase === "ebb" ? EBB_BEARING_DEG : FLOOD_BEARING_DEG };
+}
+
 async function postRender() {
   if (state.tab !== "map") { stopSelfWatch(); return; }
   const el = document.getElementById("mapcanvas");
@@ -274,6 +295,7 @@ async function postRender() {
     presence: state.presence,
     selfId: state.user?.id,
     selfColor: state.user?.color,
+    flow: tidalFlowNow(),
     onSelect: (loc) => selectLocation(loc),
     onRemoveSaved: (id) => {
       state.saved = removeSpot(id);
