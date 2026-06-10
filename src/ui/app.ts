@@ -3,6 +3,7 @@ import { loadBundle } from "../data";
 import { computeScores, overallScoreForDay, localDateKey } from "../engine/score";
 import { computeDay, type DayContext } from "../engine/context";
 import { tideVelocityAt } from "../engine/merge";
+import { buildSeaState, type SeaState } from "../engine/seastate";
 import { generateBriefing } from "../engine/briefing";
 import { tideChartSVG, gaugeSVG, scoreColor } from "./charts";
 import { loadLog, addRecord, deleteRecord, newId, seedSamples, exportJSON, importJSON } from "../store/log";
@@ -279,6 +280,27 @@ function tidalFlowNow(): TidalFlow | null {
   return { speed01, phase, bearingDeg: phase === "ebb" ? EBB_BEARING_DEG : FLOOD_BEARING_DEG };
 }
 
+// Build the mathematical sea state for an hour from its real marine fields
+// (Open-Meteo). Current is converted km/h -> m/s; depth is left deep-water (no
+// free CORS point-depth source wired yet). Null when there is no wave data.
+function seaStateForHour(h: HourPoint): SeaState | null {
+  if (h.waveHeight == null && h.swellHeight == null && h.windWaveHeight == null) return null;
+  return buildSeaState({
+    waveHeight: h.waveHeight, wavePeriod: h.wavePeriod, waveDir: h.waveDir,
+    swellHeight: h.swellHeight, swellPeriod: h.swellPeriod, swellDir: h.swellDir,
+    windWaveHeight: h.windWaveHeight, windWavePeriod: h.windWavePeriod, windWaveDir: h.windWaveDir,
+    currentSpeed: h.currentVelocity != null ? h.currentVelocity / 3.6 : null,
+    currentDir: h.currentDir,
+    depth: null,
+  });
+}
+function seaStateNow(): SeaState | null {
+  const b = state.bundle;
+  if (!b || b.location.kind !== "salt") return null;
+  return seaStateForHour(nowHour(b));
+}
+const SEA_ICON: Record<SeaState["label"], string> = { calm: "🟢", moderate: "🟡", rough: "🟠", dangerous: "🔴" };
+
 async function postRender() {
   if (state.tab !== "map") { stopSelfWatch(); return; }
   const el = document.getElementById("mapcanvas");
@@ -296,6 +318,7 @@ async function postRender() {
     selfId: state.user?.id,
     selfColor: state.user?.color,
     flow: tidalFlowNow(),
+    waves: seaStateNow()?.components ?? null,
     onSelect: (loc) => selectLocation(loc),
     onRemoveSaved: (id) => {
       state.saved = removeSpot(id);
@@ -379,6 +402,7 @@ function condStrip(b: Bundle): string {
   const mi = moonInfo(new Date());
   const fresh = b.location.kind === "fresh";
   const tideArrow = h.tideState === "rising" ? "↑ rising" : h.tideState === "falling" ? "↓ falling" : h.tideState.replace("-", " ");
+  const sea = fresh ? null : seaStateForHour(h);
   return `<div class="cond-strip">
     ${cond("Now", `${w.icon} ${w.label}`, fmtTime(h.time))}
     ${cond("Air", `${Math.round(h.airTemp)}°C`, `feels ${Math.round(h.airTemp)}°`)}
@@ -390,6 +414,8 @@ function condStrip(b: Bundle): string {
       : cond("Tide", h.tideHeight != null ? `${h.tideHeight.toFixed(2)} m` : "-", tideArrow)}
     ${fresh
       ? cond("Sun", fmtTime(b.astro.find((a) => a.date === localDateKey(h.time))?.sunrise ?? null), "sunrise")
+      : sea
+      ? cond("Sea", `${SEA_ICON[sea.label]} ${sea.label[0].toUpperCase() + sea.label.slice(1)} ${sea.score}`, h.waveHeight != null ? `${h.waveHeight.toFixed(1)} m · ${sea.tp.toFixed(0)}s` : "swell")
       : cond("Wave", h.waveHeight != null ? `${h.waveHeight.toFixed(1)} m` : "-", "swell")}
     ${cond("Moon", `${moonEmoji(mi.phase)} ${mi.illum}%`, mi.name)}
   </div>`;

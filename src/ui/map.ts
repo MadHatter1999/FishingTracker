@@ -4,6 +4,7 @@ import type { FishingLocation } from "../types";
 import { locationForPoint, HOME } from "../services/locations";
 import { WATERWAYS } from "../waterways";
 import { createFlowLayer, type TidalFlow } from "./flow";
+import type { WaveComponent } from "../engine/seastate";
 import type { TaggedAnimal, AnglerPresence } from "../types";
 
 export interface MapApi {
@@ -14,6 +15,7 @@ export interface MapApi {
   setSelfLocation(lat: number, lon: number, accuracy?: number): void;
   clearSelfLocation(): void;
   setFlow(flow: TidalFlow | null): void;
+  setWaves(waves: WaveComponent[] | null): void;
   centerOnSelf(): boolean;
   resize(): void;
   destroy(): void;
@@ -59,6 +61,7 @@ interface MountOpts {
   selfId?: string | number;
   selfColor?: string;
   flow?: TidalFlow | null;
+  waves?: WaveComponent[] | null;
   onSelect: (loc: FishingLocation) => void;
   onRemoveSaved: (id: string) => void;
 }
@@ -89,7 +92,7 @@ function animalPopup(a: TaggedAnimal): string {
 }
 
 export function mountMap(opts: MountOpts): MapApi {
-  const { container, locations, active, predators = [], presence = [], selfId, selfColor = "#36c2ce", flow = null, onSelect, onRemoveSaved } = opts;
+  const { container, locations, active, predators = [], presence = [], selfId, selfColor = "#36c2ce", flow = null, waves = null, onSelect, onRemoveSaved } = opts;
 
   const map = L.map(container, { zoomControl: true }).setView([active.lat, active.lon], active.home ? 12 : active.kind === "fresh" ? 13 : 10);
 
@@ -118,6 +121,7 @@ export function mountMap(opts: MountOpts): MapApi {
   // --- animated tidal-flow overlay (modelled from the live tide phase) ---
   const flowLayer = createFlowLayer();
   flowLayer.setFlow(flow);
+  flowLayer.setWaves(waves);
 
   // --- waterway links overlay ---
   const waterLayer = L.layerGroup();
@@ -335,6 +339,7 @@ export function mountMap(opts: MountOpts): MapApi {
     setSelfLocation: (lat, lon, accuracy) => setSelf(lat, lon, accuracy),
     clearSelfLocation: () => clearSelf(),
     setFlow: (f) => flowLayer.setFlow(f),
+    setWaves: (waveComps) => flowLayer.setWaves(waveComps),
     centerOnSelf: () => {
       if (!selfLatLng) return false;
       map.flyTo(selfLatLng, Math.max(map.getZoom(), 14));

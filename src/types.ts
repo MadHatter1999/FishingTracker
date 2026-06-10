@@ -12,9 +12,17 @@ export interface HourPoint {
   windGust: number; // km/h
   precip: number; // mm
   weatherCode: number; // WMO
-  waveHeight: number | null; // m
+  waveHeight: number | null; // Hs total, m
+  wavePeriod: number | null; // s
+  waveDir: number | null; // deg FROM
   swellHeight: number | null; // m
   swellPeriod: number | null; // s
+  swellDir: number | null; // deg FROM
+  windWaveHeight: number | null; // m
+  windWavePeriod: number | null; // s
+  windWaveDir: number | null; // deg FROM
+  currentVelocity: number | null; // km/h (ocean current, Open-Meteo)
+  currentDir: number | null; // deg TO
   waterTemp: number | null; // °C (sea surface)
   // tide (interpolated onto this hour)
   tideHeight: number | null; // m

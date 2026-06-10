@@ -1,4 +1,5 @@
 import L from "leaflet";
+import type { WaveComponent } from "../engine/seastate";
 
 // A modelled tidal-stream visualisation: an animated canvas particle field that
 // drifts in the flood/ebb direction with a speed set by the live tidal velocity.
@@ -21,9 +22,16 @@ export interface TidalFlow {
 
 export interface FlowLayer extends L.Layer {
   setFlow(flow: TidalFlow | null): void;
+  setWaves(components: WaveComponent[] | null): void;
 }
 
-interface Particle { x: number; y: number; age: number; max: number; }
+// Particle: `bx/by` is the mean position (advected by the current); `x/y` is the
+// rendered position = mean + wave orbital displacement.
+interface Particle { x: number; y: number; bx: number; by: number; age: number; max: number; }
+
+// A wave component reduced to what the renderer needs (pixel-space spatial
+// frequency + screen amplitude, real apparent temporal frequency & direction).
+interface RenderWave { kpx: number; ampPx: number; omegaApp: number; dx: number; dy: number; phase0: number; }
 
 const FLOOD_COLOR = "#5ce4f5"; // bright cyan - water flooding in
 const EBB_COLOR = "#ffb066"; // warm amber - water ebbing out
@@ -50,6 +58,8 @@ class TidalFlowLayer extends L.Layer implements FlowLayer {
   private raf = 0;
   private cur: TidalFlow = { speed01: 0, phase: "slack", bearingDeg: 0 };
   private target: TidalFlow | null = null;
+  private waves: RenderWave[] = [];
+  private waveDrift = { x: 0, y: 0 }; // small Stokes-like drift along the swell, px/frame
   private dpr = 1;
   private maskZ = MASK_MAXZOOM;
   private maskTiles: MaskTile[] = [];
@@ -99,6 +109,37 @@ class TidalFlowLayer extends L.Layer implements FlowLayer {
     if (flow) { this.cur.bearingDeg = flow.bearingDeg; this.cur.phase = flow.phase; }
   }
 
+  // Convert the physical wave components into pixel-space render waves. Direction,
+  // (apparent) frequency and the relative wavelength/energy between components are
+  // physical; only the absolute on-screen wavelength & amplitude are scaled to be
+  // visible (true ~50-300 m wavelengths are sub-pixel on a km-wide map).
+  setWaves(components: WaveComponent[] | null): void {
+    const cs = components ?? [];
+    if (!cs.length) { this.waves = []; this.waveDrift = { x: 0, y: 0 }; return; }
+    const lMax = Math.max(...cs.map((c) => c.L));
+    const aMax = Math.max(...cs.map((c) => c.amp));
+    const variance = cs.reduce((s, c) => s + (c.amp * c.amp) / 2, 0);
+    const hsEff = 4 * Math.sqrt(variance);
+    const energy01 = Math.max(0, Math.min(1, hsEff / 2.5));
+    const ampScale = 2.5 + 7 * energy01; // px orbit radius of the strongest component
+    this.waves = cs.map((c) => {
+      const Lpx = Math.max(55, Math.min(240, (c.L / lMax) * 150));
+      return {
+        kpx: (2 * Math.PI) / Lpx,
+        ampPx: (c.amp / aMax) * ampScale,
+        omegaApp: c.omegaApp,
+        dx: c.dx, dy: c.dy, phase0: c.phase0,
+      };
+    });
+    // Energy-weighted mean travel direction -> a small net drift so the swell
+    // visibly travels even at slack water (Stokes drift is along wave travel).
+    let mdx = 0, mdy = 0;
+    for (const c of cs) { const wgt = c.amp * c.amp; mdx += wgt * c.dx; mdy += wgt * c.dy; }
+    const mlen = Math.hypot(mdx, mdy) || 1;
+    const driftPx = 1.0 * energy01;
+    this.waveDrift = { x: (mdx / mlen) * driftPx, y: (mdy / mlen) * driftPx };
+  }
+
   private mkCanvas(pane: HTMLElement): HTMLCanvasElement {
     const c = L.DomUtil.create("canvas", "", pane) as HTMLCanvasElement;
     c.style.position = "absolute";
@@ -124,7 +165,8 @@ class TidalFlowLayer extends L.Layer implements FlowLayer {
   }
 
   private spawn(w: number, h: number): Particle {
-    return { x: Math.random() * w, y: Math.random() * h, age: 0, max: 30 + Math.random() * 70 };
+    const x = Math.random() * w, y = Math.random() * h;
+    return { x, y, bx: x, by: y, age: 0, max: 30 + Math.random() * 70 };
   }
 
   // Which land-mask tiles cover the viewport (+1 tile margin so a pan doesn't
@@ -207,20 +249,28 @@ class TidalFlowLayer extends L.Layer implements FlowLayer {
     const phase = this.target?.phase ?? this.cur.phase;
     const color = phase === "ebb" ? EBB_COLOR : phase === "slack" ? SLACK_COLOR : FLOOD_COLOR;
     const b = this.cur.bearingDeg * Math.PI / 180;
-    const dirx = Math.sin(b), diry = -Math.cos(b); // compass -> screen vector
-    const speedPx = 0.5 + sp * 3.8;
+    const driftx = Math.sin(b) * (0.5 + sp * 3.8) + this.waveDrift.x; // tidal advection + wave (Stokes) drift
+    const drifty = -Math.cos(b) * (0.5 + sp * 3.8) + this.waveDrift.y;
+    const waves = this.waves;
+    const t = performance.now() / 1000; // seconds, for the real wave period
 
     const segs = this.segs;
     let k = 0;
     for (const p of this.particles) {
-      const px = p.x, py = p.y;
-      const j = Math.sin(px * 0.012 + py * 0.013 + p.age * 0.05) * 0.2; // gentle swirl
-      const cs = Math.cos(j), sn = Math.sin(j);
-      p.x += (dirx * cs - diry * sn) * speedPx;
-      p.y += (dirx * sn + diry * cs) * speedPx;
+      const px = p.x, py = p.y; // previous rendered position
+      // mean position advects with the current
+      p.bx += driftx; p.by += drifty;
+      // wave orbital displacement = sum of components (deterministic, physical dir/period)
+      let ox = 0, oy = 0;
+      for (const wv of waves) {
+        const ph = wv.kpx * (wv.dx * p.bx + wv.dy * p.by) - wv.omegaApp * t + wv.phase0;
+        const d = wv.ampPx * Math.sin(ph);
+        ox += d * wv.dx; oy += d * wv.dy;
+      }
+      p.x = p.bx + ox; p.y = p.by + oy;
       p.age++;
       segs[k++] = px; segs[k++] = py; segs[k++] = p.x; segs[k++] = p.y;
-      if (p.age > p.max || p.x < -6 || p.y < -6 || p.x > w + 6 || p.y > h + 6) Object.assign(p, this.spawn(w, h));
+      if (p.age > p.max || p.bx < -6 || p.by < -6 || p.bx > w + 6 || p.by > h + 6) Object.assign(p, this.spawn(w, h));
     }
 
     ctx.lineCap = "round";

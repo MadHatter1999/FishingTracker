@@ -16,8 +16,23 @@ export interface RawWeather {
   daily: { date: string; sunrise: Date | null; sunset: Date | null }[];
 }
 
+export interface MarineHour {
+  waveHeight: number | null;     // Hs total, m
+  wavePeriod: number | null;     // s
+  waveDir: number | null;        // deg FROM
+  swellHeight: number | null;
+  swellPeriod: number | null;
+  swellDir: number | null;       // deg FROM
+  windWaveHeight: number | null;
+  windWavePeriod: number | null;
+  windWaveDir: number | null;    // deg FROM
+  currentVelocity: number | null; // km/h (Open-Meteo default)
+  currentDir: number | null;      // deg TO
+  waterTemp: number | null;       // sea-surface temp, C
+}
+
 export interface RawMarine {
-  byTime: Map<string, { waveHeight: number | null; swellHeight: number | null; swellPeriod: number | null; waterTemp: number | null }>;
+  byTime: Map<string, MarineHour>;
 }
 
 const FORECAST_URL = "https://api.open-meteo.com/v1/forecast";
@@ -76,11 +91,17 @@ export async function fetchMarine(lat: number, lon: number, days = 7): Promise<R
   const params = new URLSearchParams({
     latitude: String(lat),
     longitude: String(lon),
-    hourly: ["wave_height", "swell_wave_height", "swell_wave_period", "sea_surface_temperature"].join(","),
+    hourly: [
+      "wave_height", "wave_period", "wave_direction",
+      "swell_wave_height", "swell_wave_period", "swell_wave_direction",
+      "wind_wave_height", "wind_wave_period", "wind_wave_direction",
+      "ocean_current_velocity", "ocean_current_direction",
+      "sea_surface_temperature",
+    ].join(","),
     timezone: LOCATION.tz,
     forecast_days: String(days),
   });
-  const byTime = new Map<string, { waveHeight: number | null; swellHeight: number | null; swellPeriod: number | null; waterTemp: number | null }>();
+  const byTime = new Map<string, MarineHour>();
   try {
     const res = await fetch(`${MARINE_URL}?${params}`);
     if (!res.ok) throw new Error(`Marine API ${res.status}`);
@@ -89,8 +110,16 @@ export async function fetchMarine(lat: number, lon: number, days = 7): Promise<R
     h.time.forEach((t: string, i: number) => {
       byTime.set(isoKey(new Date(t)), {
         waveHeight: h.wave_height?.[i] ?? null,
+        wavePeriod: h.wave_period?.[i] ?? null,
+        waveDir: h.wave_direction?.[i] ?? null,
         swellHeight: h.swell_wave_height?.[i] ?? null,
         swellPeriod: h.swell_wave_period?.[i] ?? null,
+        swellDir: h.swell_wave_direction?.[i] ?? null,
+        windWaveHeight: h.wind_wave_height?.[i] ?? null,
+        windWavePeriod: h.wind_wave_period?.[i] ?? null,
+        windWaveDir: h.wind_wave_direction?.[i] ?? null,
+        currentVelocity: h.ocean_current_velocity?.[i] ?? null,
+        currentDir: h.ocean_current_direction?.[i] ?? null,
         waterTemp: h.sea_surface_temperature?.[i] ?? null,
       });
     });
