@@ -11,12 +11,15 @@ const EMPTY_TIDE: TideData = {
 
 export async function loadBundle(loc: FishingLocation, days = 7): Promise<Bundle> {
   const fresh = loc.kind === "fresh";
+  // Only weather is essential. The rest already have internal fallbacks, but
+  // wrap them so a single optional-feed failure can never reject the whole load
+  // (which showed up as the map "loading in funny / data not there").
   const [weather, marine, tide, predators, stocking] = await Promise.all([
     fetchWeather(loc.lat, loc.lon, days),
-    fresh ? Promise.resolve({ byTime: new Map() }) : fetchMarine(loc.lat, loc.lon, days),
-    fresh ? Promise.resolve(EMPTY_TIDE) : fetchTides(loc.tideStationId, loc.tideStationName, days),
-    fresh ? Promise.resolve([] as TaggedAnimal[]) : fetchTaggedAnimals(loc.lat, loc.lon),
-    fresh ? fetchStocking(loc) : Promise.resolve(null as StockingInfo | null),
+    fresh ? Promise.resolve({ byTime: new Map() }) : fetchMarine(loc.lat, loc.lon, days).catch(() => ({ byTime: new Map() })),
+    fresh ? Promise.resolve(EMPTY_TIDE) : fetchTides(loc.tideStationId, loc.tideStationName, days).catch(() => EMPTY_TIDE),
+    fresh ? Promise.resolve([] as TaggedAnimal[]) : fetchTaggedAnimals(loc.lat, loc.lon).catch(() => [] as TaggedAnimal[]),
+    fresh ? fetchStocking(loc).catch(() => null as StockingInfo | null) : Promise.resolve(null as StockingInfo | null),
   ]);
   const bundle = assembleBundle(loc, weather, marine, tide, predators);
   bundle.stocking = stocking;

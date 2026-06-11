@@ -47,6 +47,32 @@ interface MaskTile { x: number; y: number; img: HTMLImageElement; }
 // Feather radius (px) for the coastline clip once we overzoom the z9 mask.
 const featherFor = (zoom: number) => Math.max(0, Math.min(14, (zoom - MASK_MAXZOOM) * 2));
 
+// Laminar flow field: a few low-frequency sinusoids summed into a smooth scalar,
+// used to gently BEND the flow direction across space so streamlines curve like
+// a real ocean current instead of marching in one straight line. Deterministic
+// (fixed phases) and slowly time-evolving - coherent, not the old per-particle
+// jitter. Wavelengths are in screen px; `sp` is rad/s temporal drift.
+const FLOW_OCTAVES = [
+  { wl: 560, amp: 1.0, phase: 0.6, sp: 0.035 },
+  { wl: 320, amp: 0.55, phase: 2.3, sp: 0.06 },
+  { wl: 195, amp: 0.30, phase: 4.1, sp: 0.09 },
+].map((o) => ({ ...o, f: (2 * Math.PI) / o.wl }));
+const FLOW_AMP_SUM = FLOW_OCTAVES.reduce((s, o) => s + o.amp, 0);
+const MAX_BEND = 0.9; // radians of max streamline curvature
+
+// Smooth signed bend angle (radians) at a screen position & time. The two octave
+// orientations (here x-ish and y-ish via alternating axes) keep it 2-D so the
+// streamlines swirl gently rather than ripple along one axis.
+function flowBend(x: number, y: number, t: number): number {
+  let n = 0;
+  for (let i = 0; i < FLOW_OCTAVES.length; i++) {
+    const o = FLOW_OCTAVES[i];
+    const arg = i % 2 === 0 ? o.f * x + o.f * 0.6 * y : o.f * 0.6 * x - o.f * y;
+    n += o.amp * Math.sin(arg + o.phase + o.sp * t);
+  }
+  return (n / FLOW_AMP_SUM) * MAX_BEND;
+}
+
 class TidalFlowLayer extends L.Layer implements FlowLayer {
   private map: L.Map | null = null;
   private canvas: HTMLCanvasElement | null = null; // animated streaks (screen-fixed)
@@ -249,8 +275,13 @@ class TidalFlowLayer extends L.Layer implements FlowLayer {
     const phase = this.target?.phase ?? this.cur.phase;
     const color = phase === "ebb" ? EBB_COLOR : phase === "slack" ? SLACK_COLOR : FLOOD_COLOR;
     const b = this.cur.bearingDeg * Math.PI / 180;
-    const driftx = Math.sin(b) * (0.5 + sp * 3.8) + this.waveDrift.x; // tidal advection + wave (Stokes) drift
+    // Base flow = tidal advection + wave (Stokes) drift, expressed as a mean
+    // heading + speed. Per particle we BEND the heading by the smooth flow field
+    // so they trace curving laminar streamlines (not one straight reversing line).
+    const driftx = Math.sin(b) * (0.5 + sp * 3.8) + this.waveDrift.x;
     const drifty = -Math.cos(b) * (0.5 + sp * 3.8) + this.waveDrift.y;
+    const baseAng = Math.atan2(drifty, driftx);
+    const baseSpd = Math.max(0.7, Math.hypot(driftx, drifty)); // floor so it always flows
     const waves = this.waves;
     const t = performance.now() / 1000; // seconds, for the real wave period
 
@@ -258,8 +289,9 @@ class TidalFlowLayer extends L.Layer implements FlowLayer {
     let k = 0;
     for (const p of this.particles) {
       const px = p.x, py = p.y; // previous rendered position
-      // mean position advects with the current
-      p.bx += driftx; p.by += drifty;
+      // mean position advects along the locally-bent flow streamline
+      const a = baseAng + flowBend(p.bx, p.by, t);
+      p.bx += Math.cos(a) * baseSpd; p.by += Math.sin(a) * baseSpd;
       // wave orbital displacement = sum of components (deterministic, physical dir/period)
       let ox = 0, oy = 0;
       for (const wv of waves) {

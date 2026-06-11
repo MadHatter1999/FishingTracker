@@ -38,6 +38,25 @@ export interface RawMarine {
 const FORECAST_URL = "https://api.open-meteo.com/v1/forecast";
 const MARINE_URL = "https://marine-api.open-meteo.com/v1/marine";
 
+// Open-Meteo occasionally returns a transient 429 (rate limit) or a network
+// blip, especially as we now request many marine variables at once. Retry a few
+// times with backoff so a single hiccup does not blank the whole forecast.
+async function fetchJSON(url: string, label: string, tries = 3): Promise<any> {
+  let lastErr: unknown;
+  for (let i = 0; i < tries; i++) {
+    try {
+      const res = await fetch(url);
+      if (res.status === 429 || res.status >= 500) throw new Error(`${label} ${res.status}`);
+      if (!res.ok) throw new Error(`${label} ${res.status}`);
+      return await res.json();
+    } catch (e) {
+      lastErr = e;
+      if (i < tries - 1) await new Promise((r) => setTimeout(r, 400 * (i + 1) + Math.random() * 200));
+    }
+  }
+  throw lastErr;
+}
+
 function isoKey(d: Date): string {
   // round to the hour, use UTC ms key to align series
   return new Date(Math.round(d.getTime() / 3600000) * 3600000).toISOString();
@@ -63,9 +82,7 @@ export async function fetchWeather(lat: number, lon: number, days = 7): Promise<
     forecast_days: String(days),
     wind_speed_unit: "kmh",
   });
-  const res = await fetch(`${FORECAST_URL}?${params}`);
-  if (!res.ok) throw new Error(`Weather API ${res.status}`);
-  const j = await res.json();
+  const j = await fetchJSON(`${FORECAST_URL}?${params}`, "Weather API");
   const h = j.hourly;
   const hours = h.time.map((t: string, i: number) => ({
     time: new Date(t),
@@ -103,9 +120,7 @@ export async function fetchMarine(lat: number, lon: number, days = 7): Promise<R
   });
   const byTime = new Map<string, MarineHour>();
   try {
-    const res = await fetch(`${MARINE_URL}?${params}`);
-    if (!res.ok) throw new Error(`Marine API ${res.status}`);
-    const j = await res.json();
+    const j = await fetchJSON(`${MARINE_URL}?${params}`, "Marine API");
     const h = j.hourly;
     h.time.forEach((t: string, i: number) => {
       byTime.set(isoKey(new Date(t)), {
