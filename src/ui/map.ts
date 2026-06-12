@@ -4,6 +4,7 @@ import type { FishingLocation } from "../types";
 import { locationForPoint, HOME } from "../services/locations";
 import { WATERWAYS } from "../waterways";
 import { createFlowLayer, type TidalFlow } from "./flow";
+import { createCurrentLayer } from "./current";
 import type { WaveComponent } from "../engine/seastate";
 import type { TaggedAnimal, AnglerPresence } from "../types";
 
@@ -188,11 +189,15 @@ export function mountMap(opts: MountOpts): MapApi {
   const saltLayer = L.layerGroup();
   const freshLayer = L.layerGroup();
 
+  // --- ocean current (real Open-Meteo data, sampled on a grid) ---
+  const currentLayer = createCurrentLayer();
+
   // --- layers control with persisted on/off state ---
   const bases: Record<string, L.Layer> = { "Street (OSM)": osm, "Topographic": topo };
   const overlays: Record<string, L.Layer> = {
     "Guild members": memberLayer,
     "Tidal flow (animated)": flowLayer,
+    "Ocean current (data)": currentLayer,
     "Sea temp (SST)": sst,
     "Chlorophyll": chlorophyll,
     "Saltwater spots": saltLayer,
@@ -237,6 +242,21 @@ export function mountMap(opts: MountOpts): MapApi {
   const syncFlowLegend = () => { if (map.hasLayer(flowLayer)) flowLegend.addTo(map); else flowLegend.remove(); };
   map.on("overlayadd overlayremove", syncFlowLegend);
   syncFlowLegend();
+
+  // --- ocean-current legend (only visible while the data layer is on) ---
+  const currentLegend = new L.Control({ position: "bottomleft" });
+  currentLegend.onAdd = () => {
+    const d = L.DomUtil.create("div", "current-legend");
+    d.style.cssText = "background:rgba(8,20,32,.78);color:#dbe7f0;padding:6px 9px;border-radius:8px;font:11px/1.35 system-ui,sans-serif;box-shadow:0 1px 6px rgba(0,0,0,.4);pointer-events:none";
+    d.innerHTML =
+      `<b>Ocean current</b> <span style="opacity:.65">(live data)</span><br>` +
+      `<span style="display:inline-block;width:34px;height:0;border-top:2px solid;border-image:linear-gradient(90deg,#78c8dc,#7fd28c,#f0c846,#ff5a3c) 1;vertical-align:middle;margin-right:4px"></span>` +
+      `calm &rarr; strong<br><span style="opacity:.65">streaks flow downstream</span>`;
+    return d;
+  };
+  const syncCurrentLegend = () => { if (map.hasLayer(currentLayer)) currentLegend.addTo(map); else currentLegend.remove(); };
+  map.on("overlayadd overlayremove", syncCurrentLegend);
+  syncCurrentLegend();
 
   // SST + chlorophyll are coarse (~1km) ocean-scale fields - great zoomed out for
   // spotting breaks, but ugly low-res blocks zoomed in. Fade them out smoothly as

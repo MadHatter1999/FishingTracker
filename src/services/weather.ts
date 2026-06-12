@@ -38,21 +38,27 @@ export interface RawMarine {
 const FORECAST_URL = "https://api.open-meteo.com/v1/forecast";
 const MARINE_URL = "https://marine-api.open-meteo.com/v1/marine";
 
-// Open-Meteo occasionally returns a transient 429 (rate limit) or a network
-// blip, especially as we now request many marine variables at once. Retry a few
-// times with backoff so a single hiccup does not blank the whole forecast.
-async function fetchJSON(url: string, label: string, tries = 3): Promise<any> {
+// Retry only genuine transient failures (network blip / 5xx). Do NOT retry a 429:
+// the Open-Meteo free tier is rate-limited per IP and retrying just burns more of
+// the quota and prolongs the outage - fail fast so the essential calls survive.
+async function fetchJSON(url: string, label: string, tries = 2): Promise<any> {
   let lastErr: unknown;
   for (let i = 0; i < tries; i++) {
+    let res: Response;
     try {
-      const res = await fetch(url);
-      if (res.status === 429 || res.status >= 500) throw new Error(`${label} ${res.status}`);
-      if (!res.ok) throw new Error(`${label} ${res.status}`);
-      return await res.json();
-    } catch (e) {
+      res = await fetch(url);
+    } catch (e) { // network error -> retry
       lastErr = e;
-      if (i < tries - 1) await new Promise((r) => setTimeout(r, 400 * (i + 1) + Math.random() * 200));
+      if (i < tries - 1) await new Promise((r) => setTimeout(r, 500 * (i + 1)));
+      continue;
     }
+    if (res.ok) return res.json();
+    if (res.status >= 500) { // server error -> retry
+      lastErr = new Error(`${label} ${res.status}`);
+      if (i < tries - 1) await new Promise((r) => setTimeout(r, 500 * (i + 1)));
+      continue;
+    }
+    throw new Error(`${label} ${res.status}`); // 4xx incl 429 -> do not retry
   }
   throw lastErr;
 }
@@ -112,7 +118,6 @@ export async function fetchMarine(lat: number, lon: number, days = 7): Promise<R
       "wave_height", "wave_period", "wave_direction",
       "swell_wave_height", "swell_wave_period", "swell_wave_direction",
       "wind_wave_height", "wind_wave_period", "wind_wave_direction",
-      "ocean_current_velocity", "ocean_current_direction",
       "sea_surface_temperature",
     ].join(","),
     timezone: LOCATION.tz,
@@ -133,8 +138,8 @@ export async function fetchMarine(lat: number, lon: number, days = 7): Promise<R
         windWaveHeight: h.wind_wave_height?.[i] ?? null,
         windWavePeriod: h.wind_wave_period?.[i] ?? null,
         windWaveDir: h.wind_wave_direction?.[i] ?? null,
-        currentVelocity: h.ocean_current_velocity?.[i] ?? null,
-        currentDir: h.ocean_current_direction?.[i] ?? null,
+        currentVelocity: null, // current comes from the dedicated "Ocean current" layer
+        currentDir: null,
         waterTemp: h.sea_surface_temperature?.[i] ?? null,
       });
     });
