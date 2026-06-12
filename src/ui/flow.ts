@@ -23,6 +23,7 @@ export interface TidalFlow {
 export interface FlowLayer extends L.Layer {
   setFlow(flow: TidalFlow | null): void;
   setWaves(components: WaveComponent[] | null): void;
+  setWind(speedKmh: number | null, dirFromDeg: number | null): void;
 }
 
 // Particle: `bx/by` is the mean position (advected by the current); `x/y` is the
@@ -43,6 +44,37 @@ const MASK_MAXZOOM = 9; // native max zoom of the OSM land mask
 const TILE = 256;
 
 interface MaskTile { x: number; y: number; img: HTMLImageElement; }
+
+// --- SST-gradient current field ---------------------------------------------
+// At ocean scale the meaningful "current" is the large-scale circulation, which
+// the sea-surface-temperature field reveals (the Gulf Stream is a warm tongue
+// with a sharp thermal front). Geostrophic surface currents run ALONG the
+// isotherms with the warm water on their right (Northern Hemisphere) and are
+// strongest where the temperature gradient is steepest. We read the GIBS MUR SST
+// tiles (CORS *, so pixel readback is allowed), take the gradient, and steer the
+// flow from it. Above SST_FLOW_MAXZOOM the field is too coarse/local and we fall
+// back to the tidal/laminar flow.
+const SST_DATE = new Date(Date.now() - 2 * 86400000).toISOString().slice(0, 10);
+const SST_URL = `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/GHRSST_L4_MUR_Sea_Surface_Temperature/default/${SST_DATE}/GoogleMapsCompatible_Level7`;
+const SST_MAXNATIVE = 7;
+const SST_FLOW_MAXZOOM = 11; // above this: tidal/laminar flow only
+const SST_GRID = 16; // px step of the gradient grid
+const SST_FLIP = 1; // orientation sign of the warm-on-right rule
+const SST_GREF = 42; // warmth-gradient magnitude that counts as a "full" front
+const SST_MIN_PX = 0.8; // flow speed along a weak front, px/frame
+const SST_SPAN_PX = 2.9; // extra speed at a strong front
+
+// `str` = front strength (~|grad T|); `amp` = visual intensity A = a*F_T + c*|vort|
+// (where streaks should be denser/brighter); vx/vy = unit current direction.
+interface SstField { step: number; cols: number; rows: number; vx: Float32Array; vy: Float32Array; str: Float32Array; amp: Float32Array; }
+
+// shortest-arc angle interpolation
+function angLerp(a0: number, a1: number, t: number): number {
+  let d = a1 - a0;
+  while (d > Math.PI) d -= 2 * Math.PI;
+  while (d < -Math.PI) d += 2 * Math.PI;
+  return a0 + d * t;
+}
 
 // Feather radius (px) for the coastline clip once we overzoom the z9 mask.
 const featherFor = (zoom: number) => Math.max(0, Math.min(14, (zoom - MASK_MAXZOOM) * 2));
@@ -81,17 +113,28 @@ class TidalFlowLayer extends L.Layer implements FlowLayer {
   private mctx: CanvasRenderingContext2D | null = null;
   private particles: Particle[] = [];
   private segs = new Float32Array(0);
+  private segsHot = new Float32Array(0); // segments on strong fronts/eddies (extra-bright pass)
   private raf = 0;
   private cur: TidalFlow = { speed01: 0, phase: "slack", bearingDeg: 0 };
   private target: TidalFlow | null = null;
   private waves: RenderWave[] = [];
   private waveDrift = { x: 0, y: 0 }; // small Stokes-like drift along the swell, px/frame
+  private ekman = { x: 0, y: 0 }; // wind-driven Ekman surface drift, px/frame
   private dpr = 1;
   private maskZ = MASK_MAXZOOM;
   private maskTiles: MaskTile[] = [];
   private imgCache = new Map<string, HTMLImageElement>();
-  private onResize = () => { this.resize(); this.rebuildMask(); };
-  private onView = () => this.rebuildMask();
+  // SST-gradient current field
+  private sstC: HTMLCanvasElement | null = null;
+  private sstCtx: CanvasRenderingContext2D | null = null;
+  private sstTiles: MaskTile[] = [];
+  private sstCache = new Map<string, HTMLImageElement>();
+  private sstField: SstField | null = null;
+  private sstZ = SST_MAXNATIVE;
+  private sstDirty = false;
+  private sstTainted = false; // pixel readback blocked -> give up on SST steering
+  private onResize = () => { this.resize(); this.rebuildMask(); this.rebuildSst(); };
+  private onView = () => { this.rebuildMask(); this.rebuildSst(); };
   private onVis = () => { if (document.hidden) this.stop(); else this.start(); };
 
   getAttribution(): string {
@@ -110,8 +153,11 @@ class TidalFlowLayer extends L.Layer implements FlowLayer {
     this.ctx = this.canvas.getContext("2d");
     this.maskC = document.createElement("canvas");
     this.mctx = this.maskC.getContext("2d");
+    this.sstC = document.createElement("canvas");
+    this.sstCtx = this.sstC.getContext("2d", { willReadFrequently: true });
     this.resize();
     this.rebuildMask();
+    this.rebuildSst();
     map.on("resize", this.onResize);
     map.on("moveend zoomend", this.onView);
     document.addEventListener("visibilitychange", this.onVis);
@@ -125,8 +171,9 @@ class TidalFlowLayer extends L.Layer implements FlowLayer {
     map.off("moveend zoomend", this.onView);
     document.removeEventListener("visibilitychange", this.onVis);
     this.canvas?.remove();
-    this.canvas = this.ctx = this.maskC = this.mctx = null as never;
+    this.canvas = this.ctx = this.maskC = this.mctx = this.sstC = this.sstCtx = null as never;
     this.map = null; this.particles = []; this.maskTiles = []; this.imgCache.clear();
+    this.sstTiles = []; this.sstCache.clear(); this.sstField = null;
     return this;
   }
 
@@ -166,6 +213,19 @@ class TidalFlowLayer extends L.Layer implements FlowLayer {
     this.waveDrift = { x: (mdx / mlen) * driftPx, y: (mdy / mlen) * driftPx };
   }
 
+  // Wind-driven Ekman surface drift: stress tau ~ |W|*W, surface transport is
+  // 90 deg to the RIGHT of the wind in the Northern Hemisphere -> u_E ~ (tau_y,
+  // -tau_x). We keep the physical direction and scale the magnitude to px/frame.
+  setWind(speedKmh: number | null, dirFromDeg: number | null): void {
+    if (speedKmh == null || dirFromDeg == null || speedKmh <= 0) { this.ekman = { x: 0, y: 0 }; return; }
+    const ms = speedKmh / 3.6;
+    const beta = ((dirFromDeg + 180) * Math.PI) / 180; // wind blows TO this bearing
+    const wx = Math.sin(beta), wy = -Math.cos(beta); // wind unit vector (screen)
+    const mag = Math.min(1.8, ms * ms * 0.004); // ~stress, capped px/frame
+    // right of the wind (screen y-down): (vx,vy) -> (-vy, vx)
+    this.ekman = { x: -wy * mag, y: wx * mag };
+  }
+
   private mkCanvas(pane: HTMLElement): HTMLCanvasElement {
     const c = L.DomUtil.create("canvas", "", pane) as HTMLCanvasElement;
     c.style.position = "absolute";
@@ -185,13 +245,27 @@ class TidalFlowLayer extends L.Layer implements FlowLayer {
       c.width = W; c.height = H;
       c.style.width = size.x + "px"; c.style.height = size.y + "px";
     }
+    // SST readback canvas stays at CSS-px resolution (1:1 with particle coords)
+    if (this.sstC) { this.sstC.width = Math.max(1, size.x); this.sstC.height = Math.max(1, size.y); }
     const count = Math.round(Math.min(1200, Math.max(280, (size.x * size.y) / 2200)));
     this.particles = Array.from({ length: count }, () => this.spawn(size.x, size.y));
     this.segs = new Float32Array(count * 4);
+    this.segsHot = new Float32Array(count * 4);
   }
 
+  // Spawn a particle, importance-sampled toward high intensity (fronts/eddies) so
+  // streaks concentrate where A is high, while flat water still gets some spread.
   private spawn(w: number, h: number): Particle {
-    const x = Math.random() * w, y = Math.random() * h;
+    let x = Math.random() * w, y = Math.random() * h;
+    if (this.sstField) {
+      let best = -1;
+      for (let i = 0; i < 4; i++) {
+        const cx = Math.random() * w, cy = Math.random() * h;
+        const s = this.sampleSst(cx, cy);
+        const a = (s ? s.amp : 0) + 0.05; // floor so flat areas aren't starved
+        if (a > best) { best = a; x = cx; y = cy; }
+      }
+    }
     return { x, y, bx: x, by: y, age: 0, max: 30 + Math.random() * 70 };
   }
 
@@ -225,6 +299,143 @@ class TidalFlowLayer extends L.Layer implements FlowLayer {
     }
     this.maskTiles = tiles;
     if (this.imgCache.size > 200) this.imgCache.clear();
+  }
+
+  // Queue the SST tiles covering the viewport (CORS-readable) for the gradient
+  // field. Skipped when zoomed in past where SST is meaningful, or once readback
+  // has been blocked by tainting.
+  private rebuildSst(): void {
+    const map = this.map;
+    if (!map || this.sstTainted || map.getZoom() > SST_FLOW_MAXZOOM) { this.sstField = null; this.sstTiles = []; return; }
+    const z = Math.min(Math.max(0, Math.round(map.getZoom())), SST_MAXNATIVE);
+    this.sstZ = z;
+    const size = map.getSize();
+    const tl = map.project(map.containerPointToLatLng([0, 0]), z);
+    const br = map.project(map.containerPointToLatLng([size.x, size.y]), z);
+    const n = 1 << z;
+    const x0 = Math.floor(tl.x / TILE), x1 = Math.floor(br.x / TILE);
+    const y0 = Math.max(0, Math.floor(tl.y / TILE)), y1 = Math.min(n - 1, Math.floor(br.y / TILE));
+    const tiles: MaskTile[] = [];
+    for (let x = x0; x <= x1 && tiles.length < 60; x++) {
+      const tx = ((x % n) + n) % n;
+      for (let y = y0; y <= y1; y++) {
+        const key = `${z}/${tx}/${y}`;
+        let img = this.sstCache.get(key);
+        if (!img) {
+          img = new Image();
+          img.crossOrigin = "anonymous"; // GIBS sends ACAO * -> pixel readback allowed
+          img.decoding = "async";
+          img.onload = () => { this.sstDirty = true; };
+          img.src = `${SST_URL}/${z}/${y}/${tx}.png`;
+          this.sstCache.set(key, img);
+        }
+        tiles.push({ x, y, img });
+      }
+    }
+    this.sstTiles = tiles;
+    this.sstDirty = true;
+    if (this.sstCache.size > 160) this.sstCache.clear();
+  }
+
+  // Draw the SST tiles into the readback canvas and turn the temperature field
+  // into a grid of flow vectors: direction = along the isotherm with warm water
+  // on the right (NH geostrophic rule), strength = steepness of the front.
+  private buildSstField(): boolean {
+    const map = this.map, cv = this.sstC, sctx = this.sstCtx;
+    if (!map || !cv || !sctx) return false;
+    const w = cv.width, h = cv.height;
+    sctx.setTransform(1, 0, 0, 1, 0, 0);
+    sctx.clearRect(0, 0, w, h);
+    const scale = Math.pow(2, map.getZoom() - this.sstZ), tpx = TILE * scale;
+    let drew = false;
+    for (const t of this.sstTiles) {
+      if (!t.img.complete || t.img.naturalWidth === 0) continue;
+      const o = map.latLngToContainerPoint(map.unproject([t.x * TILE, t.y * TILE], this.sstZ));
+      sctx.drawImage(t.img, o.x, o.y, tpx, tpx);
+      drew = true;
+    }
+    if (!drew) return false; // tiles not loaded yet
+    let data: Uint8ClampedArray;
+    try { data = sctx.getImageData(0, 0, w, h).data; }
+    catch { this.sstTainted = true; this.sstField = null; return true; }
+    const step = SST_GRID;
+    const cols = Math.max(1, Math.floor(w / step)), rows = Math.max(1, Math.floor(h / step));
+    const vx = new Float32Array(cols * rows), vy = new Float32Array(cols * rows), str = new Float32Array(cols * rows);
+    const warmth = (cx: number, cy: number): number => {
+      cx = cx < 0 ? 0 : cx >= w ? w - 1 : cx; cy = cy < 0 ? 0 : cy >= h ? h - 1 : cy;
+      const i = (cy * w + cx) * 4;
+      if (data[i + 3] < 100) return NaN; // transparent => land / no data
+      return data[i] - data[i + 2]; // R - B: warmth proxy across the blue->red ramp
+    };
+    for (let j = 0; j < rows; j++) {
+      for (let i = 0; i < cols; i++) {
+        const x = (i * step + step / 2) | 0, y = (j * step + step / 2) | 0;
+        const wl = warmth(x - step, y), wr = warmth(x + step, y), wu = warmth(x, y - step), wd = warmth(x, y + step);
+        const idx = j * cols + i;
+        if (isNaN(wl) || isNaN(wr) || isNaN(wu) || isNaN(wd)) continue;
+        const gx = (wr - wl) / 2, gy = (wd - wu) / 2; // warmth gradient (toward warmer)
+        const gmag = Math.hypot(gx, gy);
+        if (gmag < 1e-3) continue;
+        // flow along the isotherm, warm on the right (NH): d = (gy, -gx)
+        let dxu = gy * SST_FLIP, dyu = -gx * SST_FLIP;
+        const dl = Math.hypot(dxu, dyu) || 1;
+        vx[idx] = dxu / dl; vy[idx] = dyu / dl; str[idx] = Math.min(1, gmag / SST_GREF);
+      }
+    }
+    // Propagate the front's direction outward (str-weighted smoothing) so the
+    // current has width - the whole warm jet flows, not just the thin edge.
+    let cvx = vx, cvy = vy, cstr = str;
+    for (let pass = 0; pass < 4; pass++) {
+      const nvx = new Float32Array(cols * rows), nvy = new Float32Array(cols * rows), nstr = new Float32Array(cols * rows);
+      for (let j = 0; j < rows; j++) {
+        for (let i = 0; i < cols; i++) {
+          let sx = 0, sy = 0, sw = 0, ss = 0, cnt = 0;
+          for (let dj = -1; dj <= 1; dj++) {
+            for (let di = -1; di <= 1; di++) {
+              const ii = i + di, jj = j + dj;
+              if (ii < 0 || jj < 0 || ii >= cols || jj >= rows) continue;
+              const id = jj * cols + ii, wgt = cstr[id] + 1e-4;
+              sx += cvx[id] * wgt; sy += cvy[id] * wgt; sw += wgt; ss += cstr[id]; cnt++;
+            }
+          }
+          const id = j * cols + i;
+          if (sw > 0) { const dx = sx / sw, dy = sy / sw, dl = Math.hypot(dx, dy) || 1; nvx[id] = dx / dl; nvy[id] = dy / dl; }
+          nstr[id] = (ss / cnt) * 0.94; // slight decay as the direction spreads
+        }
+      }
+      cvx = nvx; cvy = nvy; cstr = nstr;
+    }
+    // Intensity field A = a*F_T + c*|vorticity|: where streaks should concentrate
+    // and brighten. Vorticity zeta = d(Vy)/dx - d(Vx)/dy of the current vectors
+    // (magnitude proxied by str), central-differenced on the grid; it lights up
+    // eddies and shear lines that a plain front map misses.
+    const amp = new Float32Array(cols * rows);
+    const V = (a: number, comp: Float32Array) => comp[a] * cstr[a]; // velocity proxy
+    for (let j = 0; j < rows; j++) {
+      for (let i = 0; i < cols; i++) {
+        const id = j * cols + i;
+        const il = j * cols + Math.max(0, i - 1), ir = j * cols + Math.min(cols - 1, i + 1);
+        const ju = Math.max(0, j - 1) * cols + i, jd = Math.min(rows - 1, j + 1) * cols + i;
+        const zeta = (V(ir, cvy) - V(il, cvy)) / 2 - (V(jd, cvx) - V(ju, cvx)) / 2;
+        amp[id] = Math.min(1, 0.75 * cstr[id] + 2.6 * Math.abs(zeta));
+      }
+    }
+    this.sstField = { step, cols, rows, vx: cvx, vy: cvy, str: cstr, amp };
+    return true;
+  }
+
+  // Bilinear sample of the SST flow grid at a screen position.
+  private sampleSst(x: number, y: number): { vx: number; vy: number; str: number; amp: number } | null {
+    const f = this.sstField;
+    if (!f) return null;
+    const gx = x / f.step - 0.5, gy = y / f.step - 0.5;
+    let i0 = Math.floor(gx), j0 = Math.floor(gy);
+    const fx = gx - i0, fy = gy - j0;
+    i0 = Math.min(f.cols - 1, Math.max(0, i0)); j0 = Math.min(f.rows - 1, Math.max(0, j0));
+    const i1 = Math.min(f.cols - 1, i0 + 1), j1 = Math.min(f.rows - 1, j0 + 1);
+    const a = j0 * f.cols + i0, b = j0 * f.cols + i1, c = j1 * f.cols + i0, d = j1 * f.cols + i1;
+    const mix = (arr: Float32Array) => (arr[a] * (1 - fx) + arr[b] * fx) * (1 - fy) + (arr[c] * (1 - fx) + arr[d] * fx) * fy;
+    return { vx: mix(f.vx), vy: mix(f.vy), str: mix(f.str), amp: mix(f.amp) };
   }
 
   // Compose the seamless mask in the off-screen canvas, then subtract it from
@@ -278,20 +489,37 @@ class TidalFlowLayer extends L.Layer implements FlowLayer {
     // Base flow = tidal advection + wave (Stokes) drift, expressed as a mean
     // heading + speed. Per particle we BEND the heading by the smooth flow field
     // so they trace curving laminar streamlines (not one straight reversing line).
-    const driftx = Math.sin(b) * (0.5 + sp * 3.8) + this.waveDrift.x;
-    const drifty = -Math.cos(b) * (0.5 + sp * 3.8) + this.waveDrift.y;
+    const driftx = Math.sin(b) * (0.5 + sp * 3.8) + this.waveDrift.x + this.ekman.x;
+    const drifty = -Math.cos(b) * (0.5 + sp * 3.8) + this.waveDrift.y + this.ekman.y;
     const baseAng = Math.atan2(drifty, driftx);
     const baseSpd = Math.max(0.7, Math.hypot(driftx, drifty)); // floor so it always flows
     const waves = this.waves;
     const t = performance.now() / 1000; // seconds, for the real wave period
 
-    const segs = this.segs;
-    let k = 0;
+    // (re)build the SST current field when the view changed and tiles arrived
+    if (this.sstDirty && map.getZoom() <= SST_FLOW_MAXZOOM && !this.sstTainted) {
+      if (this.buildSstField()) this.sstDirty = false;
+    }
+    const sstField = this.sstField;
+
+    const segs = this.segs, segsHot = this.segsHot;
+    let k = 0, kh = 0;
     for (const p of this.particles) {
       const px = p.x, py = p.y; // previous rendered position
-      // mean position advects along the locally-bent flow streamline
-      const a = baseAng + flowBend(p.bx, p.by, t);
-      p.bx += Math.cos(a) * baseSpd; p.by += Math.sin(a) * baseSpd;
+      // Steer along the SST-derived current where a thermal front exists; blend
+      // back to the tidal/wind/laminar flow where the temperature field is flat.
+      let a: number, spd: number, inten = 0;
+      const cell = sstField ? this.sampleSst(p.bx, p.by) : null;
+      if (cell) {
+        inten = cell.amp;
+        if (cell.str > 0.04) {
+          const sstA = Math.atan2(cell.vy, cell.vx);
+          const baseA = baseAng + flowBend(p.bx, p.by, t) * (1 - cell.str);
+          a = angLerp(baseA, sstA, cell.str);
+          spd = baseSpd * (1 - cell.str) + (SST_MIN_PX + cell.str * SST_SPAN_PX) * cell.str;
+        } else { a = baseAng + flowBend(p.bx, p.by, t); spd = baseSpd; }
+      } else { a = baseAng + flowBend(p.bx, p.by, t); spd = baseSpd; }
+      p.bx += Math.cos(a) * spd; p.by += Math.sin(a) * spd;
       // wave orbital displacement = sum of components (deterministic, physical dir/period)
       let ox = 0, oy = 0;
       for (const wv of waves) {
@@ -302,17 +530,21 @@ class TidalFlowLayer extends L.Layer implements FlowLayer {
       p.x = p.bx + ox; p.y = p.by + oy;
       p.age++;
       segs[k++] = px; segs[k++] = py; segs[k++] = p.x; segs[k++] = p.y;
+      // route streaks on strong fronts/eddies to an extra-bright pass
+      if (inten > 0.4) { segsHot[kh++] = px; segsHot[kh++] = py; segsHot[kh++] = p.x; segsHot[kh++] = p.y; }
       if (p.age > p.max || p.bx < -6 || p.by < -6 || p.bx > w + 6 || p.by > h + 6) Object.assign(p, this.spawn(w, h));
     }
 
     ctx.lineCap = "round";
-    const path = () => { ctx.beginPath(); for (let i = 0; i < k; i += 4) { ctx.moveTo(segs[i], segs[i + 1]); ctx.lineTo(segs[i + 2], segs[i + 3]); } };
+    const stroke = (buf: Float32Array, n: number) => { ctx.beginPath(); for (let i = 0; i < n; i += 4) { ctx.moveTo(buf[i], buf[i + 1]); ctx.lineTo(buf[i + 2], buf[i + 3]); } ctx.stroke(); };
     // soft luminous halo
-    ctx.strokeStyle = color; ctx.lineWidth = 5.5; ctx.globalAlpha = Math.min(0.22, 0.08 + sp * 0.18); path(); ctx.stroke();
+    ctx.strokeStyle = color; ctx.lineWidth = 5.5; ctx.globalAlpha = Math.min(0.22, 0.08 + sp * 0.18); stroke(segs, k);
     // dark edge for definition on pale water
-    ctx.strokeStyle = OUTLINE; ctx.lineWidth = 3.0; ctx.globalAlpha = Math.min(0.5, 0.28 + sp * 0.28); path(); ctx.stroke();
+    ctx.strokeStyle = OUTLINE; ctx.lineWidth = 3.0; ctx.globalAlpha = Math.min(0.5, 0.28 + sp * 0.28); stroke(segs, k);
     // bright core
-    ctx.strokeStyle = color; ctx.lineWidth = 1.7; ctx.globalAlpha = Math.min(0.98, 0.6 + sp * 0.4); path(); ctx.stroke();
+    ctx.strokeStyle = color; ctx.lineWidth = 1.7; ctx.globalAlpha = Math.min(0.98, 0.6 + sp * 0.4); stroke(segs, k);
+    // extra-bright pass on fronts/eddies (intensity field A)
+    if (kh) { ctx.strokeStyle = color; ctx.lineWidth = 2.0; ctx.globalAlpha = 0.9; stroke(segsHot, kh); }
     ctx.globalAlpha = 1;
 
     this.clipToWater(ctx, w, h);

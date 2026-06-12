@@ -16,6 +16,7 @@ export interface MapApi {
   clearSelfLocation(): void;
   setFlow(flow: TidalFlow | null): void;
   setWaves(waves: WaveComponent[] | null): void;
+  setWind(speedKmh: number | null, dirFromDeg: number | null): void;
   centerOnSelf(): boolean;
   resize(): void;
   destroy(): void;
@@ -62,6 +63,7 @@ interface MountOpts {
   selfColor?: string;
   flow?: TidalFlow | null;
   waves?: WaveComponent[] | null;
+  wind?: { speedKmh: number; dirFromDeg: number } | null;
   onSelect: (loc: FishingLocation) => void;
   onRemoveSaved: (id: string) => void;
 }
@@ -92,7 +94,7 @@ function animalPopup(a: TaggedAnimal): string {
 }
 
 export function mountMap(opts: MountOpts): MapApi {
-  const { container, locations, active, predators = [], presence = [], selfId, selfColor = "#36c2ce", flow = null, waves = null, onSelect, onRemoveSaved } = opts;
+  const { container, locations, active, predators = [], presence = [], selfId, selfColor = "#36c2ce", flow = null, waves = null, wind = null, onSelect, onRemoveSaved } = opts;
 
   const map = L.map(container, { zoomControl: true }).setView([active.lat, active.lon], active.home ? 12 : active.kind === "fresh" ? 13 : 10);
 
@@ -122,6 +124,7 @@ export function mountMap(opts: MountOpts): MapApi {
   const flowLayer = createFlowLayer();
   flowLayer.setFlow(flow);
   flowLayer.setWaves(waves);
+  flowLayer.setWind(wind?.speedKmh ?? null, wind?.dirFromDeg ?? null);
 
   // --- waterway links overlay ---
   const waterLayer = L.layerGroup();
@@ -340,6 +343,7 @@ export function mountMap(opts: MountOpts): MapApi {
     clearSelfLocation: () => clearSelf(),
     setFlow: (f) => flowLayer.setFlow(f),
     setWaves: (waveComps) => flowLayer.setWaves(waveComps),
+    setWind: (s, d) => flowLayer.setWind(s, d),
     centerOnSelf: () => {
       if (!selfLatLng) return false;
       map.flyTo(selfLatLng, Math.max(map.getZoom(), 14));

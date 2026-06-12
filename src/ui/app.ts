@@ -299,6 +299,14 @@ function seaStateNow(): SeaState | null {
   if (!b || b.location.kind !== "salt") return null;
   return seaStateForHour(nowHour(b));
 }
+// Current wind (km/h + deg FROM) for the flow layer's wind-Ekman drift.
+function windNow(): { speedKmh: number; dirFromDeg: number } | null {
+  const b = state.bundle;
+  if (!b || b.location.kind !== "salt") return null;
+  const h = nowHour(b);
+  if (h.windSpeed == null || h.windDir == null) return null;
+  return { speedKmh: h.windSpeed, dirFromDeg: h.windDir };
+}
 const SEA_ICON: Record<SeaState["label"], string> = { calm: "🟢", moderate: "🟡", rough: "🟠", dangerous: "🔴" };
 
 async function postRender() {
@@ -319,6 +327,7 @@ async function postRender() {
     selfColor: state.user?.color,
     flow: tidalFlowNow(),
     waves: seaStateNow()?.components ?? null,
+    wind: windNow(),
     onSelect: (loc) => selectLocation(loc),
     onRemoveSaved: (id) => {
       state.saved = removeSpot(id);
