@@ -8,6 +8,7 @@
 // province resolve to the nearest one). This keeps adjacent urban lakes
 // (Maynard vs Banook vs Penhorn) from bleeding into each other.
 import type { FishingLocation, StockingInfo, StockingEntry } from "../types";
+import { cachedJSON, TTL } from "./cache";
 
 const DATASET = "https://data.novascotia.ca/resource/8e4a-m6fw.json";
 const SINCE = "2018-01-01T00:00:00"; // recent enough to reflect the current fishery
@@ -81,9 +82,7 @@ export async function fetchStocking(loc: FishingLocation): Promise<StockingInfo 
     u.searchParams.set("$order", "stocking_date DESC");
     u.searchParams.set("$limit", "600");
 
-    const res = await fetch(u.toString());
-    if (!res.ok) return null;
-    const rows = (await res.json()) as Row[];
+    const rows = (await cachedJSON(u.toString(), TTL.stocking, { label: "NS stocking" })) as Row[];
     if (!Array.isArray(rows) || !rows.length) return null;
 
     // Group candidate releases by waterbody name; pick the nearest one to the lake.

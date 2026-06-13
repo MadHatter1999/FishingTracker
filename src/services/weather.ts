@@ -1,4 +1,5 @@
 import { LOCATION } from "../config";
+import { cachedJSON, TTL } from "./cache";
 
 export interface RawWeather {
   hours: {
@@ -38,31 +39,6 @@ export interface RawMarine {
 const FORECAST_URL = "https://api.open-meteo.com/v1/forecast";
 const MARINE_URL = "https://marine-api.open-meteo.com/v1/marine";
 
-// Retry only genuine transient failures (network blip / 5xx). Do NOT retry a 429:
-// the Open-Meteo free tier is rate-limited per IP and retrying just burns more of
-// the quota and prolongs the outage - fail fast so the essential calls survive.
-async function fetchJSON(url: string, label: string, tries = 2): Promise<any> {
-  let lastErr: unknown;
-  for (let i = 0; i < tries; i++) {
-    let res: Response;
-    try {
-      res = await fetch(url);
-    } catch (e) { // network error -> retry
-      lastErr = e;
-      if (i < tries - 1) await new Promise((r) => setTimeout(r, 500 * (i + 1)));
-      continue;
-    }
-    if (res.ok) return res.json();
-    if (res.status >= 500) { // server error -> retry
-      lastErr = new Error(`${label} ${res.status}`);
-      if (i < tries - 1) await new Promise((r) => setTimeout(r, 500 * (i + 1)));
-      continue;
-    }
-    throw new Error(`${label} ${res.status}`); // 4xx incl 429 -> do not retry
-  }
-  throw lastErr;
-}
-
 function isoKey(d: Date): string {
   // round to the hour, use UTC ms key to align series
   return new Date(Math.round(d.getTime() / 3600000) * 3600000).toISOString();
@@ -88,7 +64,7 @@ export async function fetchWeather(lat: number, lon: number, days = 7): Promise<
     forecast_days: String(days),
     wind_speed_unit: "kmh",
   });
-  const j = await fetchJSON(`${FORECAST_URL}?${params}`, "Weather API");
+  const j = await cachedJSON(`${FORECAST_URL}?${params}`, TTL.weather, { label: "Weather API" });
   const h = j.hourly;
   const hours = h.time.map((t: string, i: number) => ({
     time: new Date(t),
@@ -125,7 +101,7 @@ export async function fetchMarine(lat: number, lon: number, days = 7): Promise<R
   });
   const byTime = new Map<string, MarineHour>();
   try {
-    const j = await fetchJSON(`${MARINE_URL}?${params}`, "Marine API");
+    const j = await cachedJSON(`${MARINE_URL}?${params}`, TTL.marine, { label: "Marine API" });
     const h = j.hourly;
     h.time.forEach((t: string, i: number) => {
       byTime.set(isoKey(new Date(t)), {

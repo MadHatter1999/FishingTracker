@@ -1,4 +1,5 @@
 import type { TaggedAnimal } from "../types";
+import { cachedJSON, TTL } from "./cache";
 
 // OCEARCH publishes its named, satellite-tagged animals (white sharks, tigers,
 // makos, tuna, turtles...) via the Mapotic API (map 3413). The geojson feed is
@@ -18,9 +19,7 @@ function emojiFor(species: string, category: string): string {
 
 export async function fetchTaggedAnimals(lat: number, lon: number, radiusDeg = 6): Promise<TaggedAnimal[]> {
   try {
-    const res = await fetch(FEED);
-    if (!res.ok) return [];
-    const j = await res.json();
+    const j = await cachedJSON(FEED, TTL.ocearch, { label: "OCEARCH" });
     const out: TaggedAnimal[] = [];
     for (const f of (j.features ?? []) as any[]) {
       const g = f.geometry;

@@ -1,5 +1,6 @@
 import L from "leaflet";
 import { LandMask } from "./landmask";
+import { cachedJSON, TTL } from "../services/cache";
 
 // "Ocean current" overlay: the REAL surface-current data (Open-Meteo Marine
 // `ocean_current_velocity`/`direction`), sampled on a grid across the viewport
@@ -162,9 +163,7 @@ class OceanCurrentLayer extends L.Layer {
     this.abort?.abort();
     this.abort = new AbortController();
     try {
-      const res = await fetch(url, { signal: this.abort.signal });
-      if (!res.ok) throw new Error(`current ${res.status}`);
-      const data = await res.json();
+      const data = await cachedJSON(url, TTL.current, { label: "Ocean current", signal: this.abort.signal });
       if (seq !== this.seq) return; // superseded
       const arr = Array.isArray(data) ? data : [data];
       const ue = new Float32Array(cols * rows), un = new Float32Array(cols * rows), spd = new Float32Array(cols * rows);

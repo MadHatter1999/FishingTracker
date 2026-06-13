@@ -1,4 +1,5 @@
 import type { TideData, TideExtreme } from "../types";
+import { cachedJSON, TTL } from "./cache";
 
 const BASE = "https://api-iwls.dfo-mpo.gc.ca/api/v1/stations";
 
@@ -9,9 +10,7 @@ interface IwlsPoint {
 
 async function fetchSeries(stationId: string, code: string, fromISO: string, toISO: string): Promise<IwlsPoint[]> {
   const url = `${BASE}/${stationId}/data?time-series-code=${code}&from=${fromISO}&to=${toISO}`;
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`IWLS ${code} ${res.status}`);
-  return (await res.json()) as IwlsPoint[];
+  return (await cachedJSON(url, TTL.tide, { label: `IWLS ${code}` })) as IwlsPoint[];
 }
 
 function classifyExtremes(pts: IwlsPoint[]): TideExtreme[] {
