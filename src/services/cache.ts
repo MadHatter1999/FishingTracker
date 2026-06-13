@@ -14,9 +14,9 @@ interface Entry { t: number; v: unknown; }
 // Common time-to-live values (ms). Tuned to how often each source actually
 // changes vs. how scarce the quota is.
 export const TTL = {
-  weather: 3 * 3600e3,   // Open-Meteo forecast refreshes ~hourly; 3h is plenty
-  marine: 12 * 3600e3,   // SMOC waves/SST/currents update ~daily
-  current: 12 * 3600e3,  // SMOC ocean current (multi-point: the heaviest caller)
+  weather: 1 * 3600e3,   // Open-Meteo forecast model re-runs ~hourly -> refresh hourly (cheap single-point call)
+  marine: 6 * 3600e3,    // SMOC waves/SST update ~daily; 6h picks up the daily run promptly
+  current: 12 * 3600e3,  // SMOC ocean current (multi-point: the heaviest caller, daily upstream)
   tide: 24 * 3600e3,     // CHS predictions are deterministic for days
   ocearch: 6 * 3600e3,   // tagged-animal pings ~daily
   stocking: 24 * 3600e3, // provincial stocking updates ~weekly

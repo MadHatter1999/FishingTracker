@@ -72,6 +72,7 @@ export async function start() {
   }
   state.user = user;
   startPresence();
+  startAutoRefresh();
 
   root().innerHTML = `<div class="boot"><img class="boot-logo" src="/fishing.png" width="64" height="64"/><div class="boot-spinner"></div><div class="boot-text">Reading the water...</div></div>`;
   try {
@@ -116,6 +117,38 @@ function doLogout() {
   state.bundle = null;
   teardownMap();
   renderLogin(root(), () => { start(); });
+}
+
+// Keep an open app current without hammering the APIs. Re-derive "now" and pull
+// any newer model run when the clock crosses an hour, or when you return to the
+// tab. loadBundle is cache-backed, so this hits the network ONLY if a TTL has
+// elapsed (typically just the hourly weather refresh); otherwise it just advances
+// the displayed hour. Skipped while typing (don't wipe a half-filled catch-log)
+// or while the tab is hidden.
+let autoRefreshSetup = false;
+function startAutoRefresh() {
+  if (autoRefreshSetup) return;
+  autoRefreshSetup = true;
+  let lastHour = new Date().getHours();
+  setInterval(() => {
+    if (document.hidden) return;
+    const h = new Date().getHours();
+    if (h !== lastHour) { lastHour = h; backgroundRefresh(); }
+  }, 60 * 1000);
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden && state.bundle && Date.now() - +state.bundle.fetchedAt > 10 * 60 * 1000) backgroundRefresh();
+  });
+}
+
+async function backgroundRefresh() {
+  if (!state.user || !state.bundle || state.error) return;
+  const el = document.activeElement;
+  if (el && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName)) return; // don't interrupt data entry
+  try {
+    state.bundle = await loadBundle(state.location, 7); // cache-backed: network only if a TTL elapsed
+    state.scored = computeScores(state.bundle);
+    render();
+  } catch { /* keep showing the last good data */ }
 }
 
 async function reloadForLocation() {
