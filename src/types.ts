@@ -196,12 +196,22 @@ export interface AnglerPresence {
   updatedAt: string | null;
 }
 
+// A species documented near a location (OBIS "what's where").
+export interface OccTaxon {
+  sci: string;
+  common: string | null;
+  group: "shark" | "ray" | "fish";
+  emoji: string;
+  records: number;
+}
+
 export interface Bundle {
   location: FishingLocation;
   hours: HourPoint[];
   tide: TideData;
   astro: DayAstro[];
   predators: TaggedAnimal[]; // named tagged animals (OCEARCH)
+  nearbyTaxa?: OccTaxon[]; // species documented near here (OBIS, marine) - "what's where"
   stocking?: StockingInfo | null; // provincial stocking history (freshwater)
   fetchedAt: Date;
   warnings: string[];

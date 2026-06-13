@@ -20,6 +20,7 @@ export const TTL = {
   tide: 24 * 3600e3,     // CHS predictions are deterministic for days
   ocearch: 6 * 3600e3,   // tagged-animal pings ~daily
   stocking: 24 * 3600e3, // provincial stocking updates ~weekly
+  occurrences: 7 * 24 * 3600e3, // OBIS "what's where" - historical records, barely changes
 };
 
 export function cacheRead<T>(key: string): { age: number; value: T } | null {

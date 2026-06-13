@@ -765,7 +765,36 @@ function tabSpecies(b: Bundle, ctx: DayContext): string {
     </div>
     <div class="note-sm">* "KEEP" still requires you to verify current DFO Maritimes / NS Anglers' Handbook seasons, size/slot limits and licences. When in doubt, release.</div>
   </div>
-  ${fresh ? stockingPanel(b) : predatorPanel(b)}`;
+  ${fresh ? stockingPanel(b) : predatorPanel(b)}
+  ${nearbyPanel(b)}`;
+}
+
+// "What's where": real marine species documented near this point (OBIS, global).
+// Surfaces species beyond our curated roster and works at any coastal location.
+function nearbyPanel(b: Bundle): string {
+  if (b.location.kind === "fresh") return ""; // OBIS is marine; lakes use the curated list + stocking
+  const taxa = b.nearbyTaxa ?? [];
+  const src = `<a href="https://obis.org" target="_blank" rel="noopener">OBIS →</a>`;
+  if (!taxa.length) {
+    return `<div class="card mt"><h2>🌊 Documented near here</h2>
+      <p class="muted" style="font-size:13px;margin:0">No marine occurrence records within ~35 km of this point (OBIS). Drop the hook on a coastal/ocean point to see what's recorded there. Source: ${src}</p></div>`;
+  }
+  const short = (n: number) => (n >= 1000 ? Math.round(n / 1000) + "k" : String(n));
+  const chip = (t: import("../types").OccTaxon) =>
+    `<span class="badge" title="${esc(t.sci)} · ${t.records.toLocaleString()} records">${t.emoji} ${t.common ? esc(t.common) : `<i>${esc(t.sci)}</i>`} <span class="muted">${short(t.records)}</span></span>`;
+  const sharks = taxa.filter((t) => t.group !== "fish");
+  const fish = taxa.filter((t) => t.group === "fish");
+  const fishShown = fish.slice(0, 48);
+  const more = taxa.length - sharks.length - fishShown.length;
+  return `<div class="card mt">
+    <h2>🌊 Documented near here <span class="legalflag lf-check">${taxa.length} species</span></h2>
+    <p class="muted" style="font-size:13px;margin:0 0 10px">Marine species with verified records within ~35 km of ${esc(b.location.name)}, from the global <b>OBIS</b> database. These are observation records (count = how often recorded), not a live forecast - but they tell you what actually lives here. Works anywhere you drop the hook.</p>
+    ${sharks.length ? `<div class="note-sm" style="margin:0 0 4px"><b>Sharks &amp; rays</b></div>
+      <div class="flex" style="flex-wrap:wrap;gap:6px;margin-bottom:10px">${sharks.map(chip).join("")}</div>` : ""}
+    <div class="note-sm" style="margin:0 0 4px"><b>Fish</b></div>
+    <div class="flex" style="flex-wrap:wrap;gap:6px">${fishShown.map(chip).join("")}</div>
+    <div class="note-sm" style="margin-top:10px">${more > 0 ? `+ ${more} more recorded. ` : ""}Source: ${src} · scientific name shown where no common name.</div>
+  </div>`;
 }
 
 function stockingPanel(b: Bundle): string {
