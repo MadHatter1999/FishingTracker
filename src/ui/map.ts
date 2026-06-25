@@ -6,7 +6,7 @@ import { WATERWAYS } from "../waterways";
 import { createFlowLayer, type TidalFlow } from "./flow";
 import { createCurrentLayer } from "./current";
 import type { WaveComponent } from "../engine/seastate";
-import type { TaggedAnimal, AnglerPresence } from "../types";
+import type { TaggedAnimal, AnglerPresence, LandSighting } from "../types";
 import type { TrailState } from "../store/trail";
 
 export interface MapApi {
@@ -158,7 +158,7 @@ async function cacheArea(
 // Remember which base + overlay layers the user had on, so they survive the
 // map being torn down and remounted when a new location loads.
 interface LayerPrefs { base: string; overlays: string[]; }
-const LAYER_KEY = "mccormacks.maplayers.v6";
+const LAYER_KEY = "mccormacks.maplayers.v7";
 function loadLayerPrefs(): LayerPrefs | null {
   try {
     const raw = localStorage.getItem(LAYER_KEY);
@@ -176,6 +176,7 @@ interface MountOpts {
   locations: FishingLocation[];
   active: FishingLocation;
   predators?: TaggedAnimal[];
+  landPredators?: LandSighting[];
   presence?: AnglerPresence[];
   selfId?: string | number;
   selfColor?: string;
@@ -197,6 +198,41 @@ function pesc(s: string): string {
   return (s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]!));
 }
 
+function sightingAge(iso: string | null): string {
+  if (!iso) return "date unknown";
+  const d = new Date(`${iso}T12:00:00`).getTime();
+  const days = Math.floor((Date.now() - d) / 86400000);
+  if (days <= 0) return "today";
+  if (days === 1) return "yesterday";
+  if (days < 30) return `${days} days ago`;
+  if (days < 365) return `${Math.round(days / 30)} mo ago`;
+  return `${Math.round(days / 365)} yr ago`;
+}
+
+function sightingPopup(s: LandSighting): string {
+  const img = s.photo ? `<img src="${pesc(s.photo)}" alt="" style="width:100%;height:96px;object-fit:cover;display:block"/>` : "";
+  return `<div style="width:200px">${img}<div style="padding:7px 9px">
+    <div style="font-weight:700;color:#06243a">${s.emoji} ${pesc(s.common)}</div>
+    <div style="font-size:12px;color:#33495c">Seen ${pesc(s.observedOn ?? "date unknown")} (${sightingAge(s.observedOn)})</div>
+    ${s.place ? `<div style="font-size:12px;color:#5b768c">${pesc(s.place)}</div>` : ""}
+    ${s.obscured ? `<div style="font-size:11px;color:#b06a00">~ approximate location (obscured by iNaturalist)</div>` : ""}
+    ${s.url ? `<a href="${pesc(s.url)}" target="_blank" rel="noopener" style="font-size:12px">iNaturalist &rarr;</a>` : ""}
+  </div></div>`;
+}
+
+// Combined popup when several sightings overlap at one spot (so you can read all
+// of them even though you could only hover one marker).
+function sightingsPopup(items: LandSighting[]): string {
+  const rows = items.slice(0, 12).map((s) => `<div style="padding:4px 0;border-top:1px solid #dce6ef">
+    <span style="font-weight:600;color:#06243a">${s.emoji} ${pesc(s.common)}</span>
+    <span style="color:#5b768c;font-size:12px"> ${sightingAge(s.observedOn)}</span>${s.obscured ? ` <span style="font-size:10px;color:#b06a00">~approx</span>` : ""}
+    ${s.url ? ` <a href="${pesc(s.url)}" target="_blank" rel="noopener" style="font-size:11px">iNat &rarr;</a>` : ""}
+  </div>`).join("");
+  const more = items.length > 12 ? `<div style="font-size:11px;color:#5b768c;padding-top:4px">+ ${items.length - 12} more</div>` : "";
+  return `<div style="width:216px;padding:7px 9px">
+    <div style="font-weight:700;color:#06243a">${items.length} sightings near here</div>${rows}${more}</div>`;
+}
+
 function animalPopup(a: TaggedAnimal): string {
   const ping = a.lastPing ? new Date(a.lastPing).toLocaleDateString("en-CA", { year: "numeric", month: "short", day: "numeric" }) : "unknown";
   const bits = [a.gender, a.stage, a.length, a.weight].filter(Boolean).map((x) => pesc(String(x))).join(" · ");
@@ -213,7 +249,7 @@ function animalPopup(a: TaggedAnimal): string {
 }
 
 export function mountMap(opts: MountOpts): MapApi {
-  const { container, locations, active, predators = [], presence = [], selfId, selfColor = "#36c2ce", flow = null, waves = null, wind = null, trail = null, onSelect, onRemoveSaved } = opts;
+  const { container, locations, active, predators = [], landPredators = [], presence = [], selfId, selfColor = "#36c2ce", flow = null, waves = null, wind = null, trail = null, onSelect, onRemoveSaved } = opts;
 
   const map = L.map(container, { zoomControl: true }).setView([active.lat, active.lon], active.home ? 12 : active.kind === "fresh" ? 13 : 10);
 
@@ -288,6 +324,47 @@ export function mountMap(opts: MountOpts): MapApi {
     m.bindPopup(animalPopup(a), { maxWidth: 250 });
     m.addTo(predatorLayer);
   }
+
+  // --- land predators (recent iNaturalist sightings) overlay ---
+  // Bears/coyotes/bobcat/lynx/fox SEEN near here (observations, not live tracking),
+  // for camping awareness. Each marker is one sighting; click for date + photo.
+  const landLayer = L.layerGroup();
+  const landIcon = (emoji: string, obscured: boolean) =>
+    L.divIcon({ className: "", html: `<div class="mk-land"${obscured ? ' style="opacity:.7"' : ""}>${emoji}</div>`, iconSize: [24, 24], iconAnchor: [12, 12] });
+  const landClusterIcon = (emoji: string, n: number) =>
+    L.divIcon({ className: "", html: `<div class="mk-land mk-landcluster">${emoji}<span class="cl-count">${n}</span></div>`, iconSize: [26, 26], iconAnchor: [13, 13] });
+  // Group sightings that sit within a marker's width of each other AT THE CURRENT
+  // ZOOM into one marker, so overlapping pins don't bury each other - the combined
+  // popup lists them all. Re-clustered on zoom (relative pixel spacing changes).
+  function renderLand(): void {
+    landLayer.clearLayers();
+    if (!landPredators.length) return;
+    const THRESH = 24; // px, ~ the icon size
+    const groups: { x: number; y: number; items: LandSighting[] }[] = [];
+    for (const s of landPredators) {
+      const p = map.latLngToContainerPoint([s.lat, s.lon]);
+      const g = groups.find((q) => Math.abs(q.x - p.x) < THRESH && Math.abs(q.y - p.y) < THRESH);
+      if (g) g.items.push(s);
+      else groups.push({ x: p.x, y: p.y, items: [s] });
+    }
+    for (const g of groups) {
+      const rep = g.items[0]; // list is already newest-first
+      if (g.items.length === 1) {
+        const m = L.marker([rep.lat, rep.lon], { icon: landIcon(rep.emoji, rep.obscured), zIndexOffset: 550 });
+        m.bindTooltip(`${rep.emoji} ${pesc(rep.common)} - ${sightingAge(rep.observedOn)}`, { direction: "top" });
+        m.bindPopup(sightingPopup(rep), { maxWidth: 220 });
+        m.addTo(landLayer);
+      } else {
+        const m = L.marker([rep.lat, rep.lon], { icon: landClusterIcon(rep.emoji, g.items.length), zIndexOffset: 560 });
+        const kinds = [...new Set(g.items.map((i) => `${i.emoji} ${i.common}`))].join(", ");
+        m.bindTooltip(`${g.items.length} sightings: ${pesc(kinds)}`, { direction: "top" });
+        m.bindPopup(sightingsPopup(g.items), { maxWidth: 240 });
+        m.addTo(landLayer);
+      }
+    }
+  }
+  renderLand();
+  map.on("zoomend", renderLand);
   // --- guild members (live shared positions) overlay ---
   // One coloured hook per member who is currently sharing their location.
   const memberLayer = L.layerGroup();
@@ -363,6 +440,7 @@ export function mountMap(opts: MountOpts): MapApi {
     "Bathymetry (GEBCO)": gebco,
     "Waterway links": waterLayer,
     "Ocean predators": predatorLayer,
+    "Land predators (sightings)": landLayer,
   };
 
   const prefs = loadLayerPrefs();
@@ -371,7 +449,7 @@ export function mountMap(opts: MountOpts): MapApi {
   const onOverlays = prefs
     ? prefs.overlays
     : active.kind === "fresh"
-    ? ["Guild members", "Crown land", "Hiking trails", "Waterway links", "Freshwater spots"]
+    ? ["Guild members", "Crown land", "Hiking trails", "Land predators (sightings)", "Waterway links", "Freshwater spots"]
     : ["Guild members", "Tidal flow (animated)", "Sea charts / depths", "Waterway links", "Ocean predators", "Saltwater spots", "Freshwater spots"];
   for (const name of Object.keys(overlays)) if (onOverlays.includes(name)) overlays[name].addTo(map);
 

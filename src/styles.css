@@ -221,6 +221,9 @@ label.field.wide { grid-column: 1 / -1; }
 .mk-pin { width: 34px; height: 34px; object-fit: contain; filter: drop-shadow(0 3px 5px rgba(0,0,0,.55)); }
 .mk-saved { width: 20px; height: 20px; display: grid; place-items: center; background: var(--warn); color: #04222b; border-radius: 50%; font-size: 13px; font-weight: 800; box-shadow: 0 2px 6px rgba(0,0,0,.5); }
 .mk-pred { font-size: 18px; line-height: 22px; text-align: center; filter: drop-shadow(0 1px 2px rgba(0,0,0,.7)); }
+.mk-land { font-size: 17px; line-height: 20px; text-align: center; filter: drop-shadow(0 1px 2px rgba(0,0,0,.7)); }
+.mk-landcluster { position: relative; font-size: 18px; }
+.mk-landcluster .cl-count { position: absolute; top: -7px; right: -9px; background: var(--bad); color: #fff; font-size: 10px; font-weight: 700; line-height: 1; border-radius: 999px; padding: 2px 4px; min-width: 9px; box-shadow: 0 1px 2px rgba(0,0,0,.6); }
 .mk-angler { width: 28px; height: 28px; display: grid; place-items: center; font-size: 15px; line-height: 1; border-radius: 50%; background: var(--ac, #36c2ce); border: 3px solid #fff; box-shadow: 0 3px 7px rgba(0,0,0,.6); }
 .mk-camp { font-size: 22px; line-height: 1; text-align: center; filter: drop-shadow(0 2px 3px rgba(0,0,0,.75)); }
 .mk-poi { font-size: 18px; line-height: 1; text-align: center; filter: drop-shadow(0 1px 2px rgba(0,0,0,.7)); }

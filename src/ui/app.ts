@@ -467,6 +467,7 @@ async function postRender() {
     locations: allLocations(),
     active: state.location,
     predators: state.bundle?.predators ?? [],
+    landPredators: state.bundle?.landPredators ?? [],
     presence: state.presence,
     selfId: state.user?.id,
     selfColor: state.user?.color,

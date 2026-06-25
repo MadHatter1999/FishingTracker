@@ -217,8 +217,24 @@ export interface Bundle {
   tide: TideData;
   astro: DayAstro[];
   predators: TaggedAnimal[]; // named tagged animals (OCEARCH)
+  landPredators?: LandSighting[]; // recent land-predator sightings near here (iNaturalist)
   nearbyTaxa?: OccTaxon[]; // species documented near here (OBIS, marine) - "what's where"
   stocking?: StockingInfo | null; // provincial stocking history (freshwater)
   fetchedAt: Date;
   warnings: string[];
+}
+
+// A recent land-predator sighting (bear/coyote/bobcat/lynx/fox) from iNaturalist.
+// These are OBSERVATIONS (where an animal was seen + recorded), NOT live tracking.
+export interface LandSighting {
+  species: string; // scientific name
+  common: string; // display common name
+  emoji: string;
+  lat: number;
+  lon: number;
+  observedOn: string | null; // ISO date the animal was seen
+  obscured: boolean; // iNaturalist randomised the location (sensitive taxon) -> approximate
+  place: string | null;
+  photo: string | null;
+  url: string | null; // iNaturalist observation page
 }
