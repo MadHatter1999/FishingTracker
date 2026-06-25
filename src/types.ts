@@ -194,6 +194,12 @@ export interface AnglerPresence {
   lat: number;
   lon: number;
   updatedAt: string | null;
+  // Downsampled recent breadcrumb shared while the member is in Trail mode, drawn
+  // as their "Indiana Jones" path. Absent/empty when not hiking.
+  trail?: { lat: number; lon: number }[];
+  // Member ids this person has chosen to share their trail with (one-way). A
+  // viewer draws this trail only if their own id is in here.
+  shareWith?: (string | number)[];
 }
 
 // A species documented near a location (OBIS "what's where").

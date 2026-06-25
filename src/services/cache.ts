@@ -50,6 +50,21 @@ function evictOldest(): void {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+// Pull the provider's human-readable explanation out of a failed response so the
+// error says WHY (Open-Meteo returns {"error":true,"reason":"..."} on 4xx, e.g.
+// "Daily API request limit exceeded" or "Latitude must be in range ...").
+async function failureReason(res: Response): Promise<string> {
+  try {
+    const text = await res.text();
+    if (!text) return "";
+    try {
+      const j = JSON.parse(text);
+      if (typeof j?.reason === "string") return j.reason;
+    } catch { /* not JSON */ }
+    return text.slice(0, 140);
+  } catch { return ""; }
+}
+
 // Fetch JSON through the cache. Fresh hit -> no network. Retries only genuine
 // transient failures (network / 5xx); fails fast on 4xx incl. 429 (retrying a
 // rate limit just burns more quota). Serves stale on any failure.
@@ -67,8 +82,10 @@ export async function cachedJSON(url: string, maxAgeMs: number, opts: { label?: 
       lastErr = e; if (i < 1) await sleep(500); continue;
     }
     if (res.ok) { const data = await res.json(); cacheWrite(url, data); return data; }
-    if (res.status >= 500) { lastErr = new Error(`${label} ${res.status}`); if (i < 1) await sleep(500); continue; }
-    lastErr = new Error(`${label} ${res.status}`); break; // 4xx / 429 -> do not retry
+    const reason = await failureReason(res);
+    const msg = `${label} ${res.status}${reason ? `: ${reason}` : ""}`;
+    if (res.status >= 500) { lastErr = new Error(msg); if (i < 1) await sleep(500); continue; }
+    lastErr = new Error(msg); break; // 4xx / 429 -> do not retry
   }
   if (hit) return hit.value; // last-good real data beats nothing
   throw lastErr;

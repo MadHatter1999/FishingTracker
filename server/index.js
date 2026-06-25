@@ -149,6 +149,14 @@ async function handleApi(req, res, url) {
     return send(res, 200, { palette: PALETTE });
   }
 
+  // --- public roster (any active member): names/colours + who's sharing now,
+  //     for the Trail-mode member lookup. No admin-only fields. ---
+  if (path === "/api/members" && method === "GET") {
+    const rows = db.prepare("SELECT * FROM users ORDER BY is_admin DESC, username COLLATE NOCASE").all();
+    const online = new Set([...presence.keys()]);
+    return send(res, 200, { members: rows.map((r) => ({ ...publicUser(r), online: online.has(r.id) })) });
+  }
+
   // --- admin-only: user management ---
   if (path.startsWith("/api/users")) {
     if (!me.is_admin) return send(res, 403, { error: "Admin only" });
@@ -257,7 +265,7 @@ function rosterFor(excludeId) {
     if (p.lat == null || p.lon == null) continue; // sharing turned off / no fix yet
     const u = db.prepare("SELECT * FROM users WHERE id = ?").get(uid);
     if (!u) continue;
-    out.push({ id: uid, username: u.username, displayName: u.display_name, color: u.color, lat: p.lat, lon: p.lon, updatedAt: p.updatedAt });
+    out.push({ id: uid, username: u.username, displayName: u.display_name, color: u.color, lat: p.lat, lon: p.lon, updatedAt: p.updatedAt, trail: p.trail || [], shareWith: p.shareWith || [] });
   }
   return out;
 }
@@ -326,11 +334,16 @@ wss.on("connection", (ws, user) => {
       e.lat = msg.lat;
       e.lon = msg.lon;
       e.accuracy = typeof msg.accuracy === "number" ? msg.accuracy : null;
+      // Live Trail-mode breadcrumb (downsampled, capped client-side); null clears it.
+      e.trail = Array.isArray(msg.trail) ? msg.trail.slice(0, 200) : [];
+      e.shareWith = Array.isArray(msg.shareWith) ? msg.shareWith.slice(0, 200) : [];
       e.updatedAt = new Date().toISOString();
       broadcastRoster();
     } else if (msg.type === "stop") {
       e.lat = null;
       e.lon = null;
+      e.trail = [];
+      e.shareWith = [];
       e.updatedAt = null;
       broadcastRoster();
     }

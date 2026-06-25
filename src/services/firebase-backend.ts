@@ -236,6 +236,17 @@ let geoWatch: number | null = null;
 let sharing = false;
 let lastSent = 0;
 let pageHideBound = false;
+// The member's current downsampled trail, included on each presence write while
+// they're hiking in Trail mode (null/empty otherwise). Set by the app layer.
+let sharedTrail: { lat: number; lon: number }[] | null = null;
+export function setSharedTrail(pts: { lat: number; lon: number }[] | null): void {
+  sharedTrail = pts && pts.length ? pts : null;
+}
+// Member ids allowed to see this member's trail (one-way share targets).
+let shareTargets: (string | number)[] = [];
+export function setShareTargets(ids: (string | number)[]): void {
+  shareTargets = ids ?? [];
+}
 
 export function loadSharePref(): boolean {
   return localStorage.getItem(SHARE_KEY) === "1";
@@ -264,7 +275,7 @@ export function connectPresence(): void {
       const out: AnglerPresence[] = [];
       snap.forEach((d) => {
         if (d.id === me.uid) return;
-        const v = d.data() as { displayName?: string; username?: string; color?: string; lat?: number; lon?: number; sharing?: boolean; updatedAt?: number };
+        const v = d.data() as { displayName?: string; username?: string; color?: string; lat?: number; lon?: number; sharing?: boolean; updatedAt?: number; trail?: { lat: number; lon: number }[]; shareWith?: (string | number)[] };
         if (!v.sharing || typeof v.lat !== "number" || typeof v.lon !== "number") return;
         if (typeof v.updatedAt !== "number" || now - v.updatedAt > STALE_MS) return;
         out.push({
@@ -275,6 +286,8 @@ export function connectPresence(): void {
           lat: v.lat,
           lon: v.lon,
           updatedAt: new Date(v.updatedAt).toISOString(),
+          trail: Array.isArray(v.trail) ? v.trail : [],
+          shareWith: Array.isArray(v.shareWith) ? v.shareWith : [],
         });
       });
       lastRoster = out;
@@ -295,6 +308,8 @@ async function writePresence(lat: number, lon: number, accuracy?: number): Promi
     lon,
     accuracy: accuracy ?? null,
     sharing: true,
+    trail: sharedTrail ?? [],
+    shareWith: shareTargets ?? [],
     updatedAt: Date.now(),
     serverAt: serverTimestamp(),
   }).catch(() => {});

@@ -7,6 +7,7 @@ import { createFlowLayer, type TidalFlow } from "./flow";
 import { createCurrentLayer } from "./current";
 import type { WaveComponent } from "../engine/seastate";
 import type { TaggedAnimal, AnglerPresence } from "../types";
+import type { TrailState } from "../store/trail";
 
 export interface MapApi {
   setPin(loc: FishingLocation, recenter?: boolean): void;
@@ -15,10 +16,13 @@ export interface MapApi {
   setPresence(anglers: AnglerPresence[], selfId?: string | number): void;
   setSelfLocation(lat: number, lon: number, accuracy?: number): void;
   clearSelfLocation(): void;
+  setTrail(trail: TrailState | null): void;
+  fitTrail(): void;
   setFlow(flow: TidalFlow | null): void;
   setWaves(waves: WaveComponent[] | null): void;
   setWind(speedKmh: number | null, dirFromDeg: number | null): void;
   centerOnSelf(): boolean;
+  cacheVisibleArea(onProgress?: (p: OfflineProgress) => void): Promise<{ ok: number; fail: number; total: number }>;
   resize(): void;
   destroy(): void;
 }
@@ -38,10 +42,123 @@ function gibsLayer(layerId: string, attribution: string): L.TileLayer {
   );
 }
 
+// NS government ArcGIS MapServers expose a working REST `export` operation but a
+// BROKEN WMS endpoint (GetCapabilities returns an HTML error page), so Crown land
+// is rendered as a per-tile ArcGIS dynamic export rather than L.tileLayer.wms.
+// Display-only tiles (loaded as <img>), so cross-origin CORS does not apply.
+const WM_ORIGIN = 20037508.342789244; // half the Web Mercator world extent, in metres
+// `dynamicLayers` (a JSON renderer string) overrides the service's own washed-out
+// symbology with our own vibrant colours; when omitted we just draw layer `layerId`.
+function arcgisExportLayer(baseUrl: string, layerId: string, options: L.TileLayerOptions, dynamicLayers?: string): L.TileLayer {
+  const layer = L.tileLayer("", options);
+  (layer as unknown as { getTileUrl(c: L.Coords): string }).getTileUrl = (coords: L.Coords): string => {
+    const span = (2 * WM_ORIGIN) / 2 ** coords.z; // tile edge length in metres at this zoom
+    const xmin = -WM_ORIGIN + coords.x * span;
+    const ymax = WM_ORIGIN - coords.y * span;
+    const qs = new URLSearchParams({
+      bbox: `${xmin},${ymax - span},${xmin + span},${ymax}`,
+      bboxSR: "3857", imageSR: "3857", size: "256,256", dpi: "96",
+      format: "png32", transparent: "true", f: "image",
+    });
+    if (dynamicLayers) qs.set("dynamicLayers", dynamicLayers);
+    else qs.set("layers", `show:${layerId}`);
+    return `${baseUrl}/export?${qs}`;
+  };
+  return layer;
+}
+
+// Vibrant override for Crown land: a punchy translucent green fill + bold outline,
+// so it reads clearly over both the OSM and topographic basemaps (the service's
+// native symbology washes out under the map).
+const CROWN_RENDERER = JSON.stringify([{
+  id: 0,
+  source: { type: "mapLayer", mapLayerId: 0 },
+  drawingInfo: { renderer: { type: "simple", symbol: {
+    type: "esriSFS", style: "esriSFSSolid", color: [64, 224, 120, 125],
+    outline: { type: "esriSLS", style: "esriSLSSolid", color: [22, 163, 74, 255], width: 1.5 },
+  } } },
+}]);
+
+// Base-map tile templates, shared by the live layers and the offline cacher so
+// the saved tile URLs match exactly what Leaflet requests (subdomain formula and
+// all), giving real cache hits when there's no signal.
+const OSM_URL = "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png";
+const TOPO_URL = "https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png";
+const TRAILS_URL = "https://tile.waymarkedtrails.org/hiking/{z}/{x}/{y}.png";
+// Must match public/sw.js, which serves these tiles cache-first when offline.
+const TILE_CACHE = "nsag-tiles-v1";
+
+export interface OfflineProgress { done: number; total: number; }
+
+// slippy-map tile maths (lon/lat -> tile x/y at zoom z)
+function lon2tx(lon: number, z: number): number {
+  return Math.floor(((lon + 180) / 360) * 2 ** z);
+}
+function lat2ty(lat: number, z: number): number {
+  const r = (lat * Math.PI) / 180;
+  return Math.floor(((1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2) * 2 ** z);
+}
+// Same subdomain rota Leaflet uses (abs(x+y) % subs), so a saved URL is byte-for-
+// byte the one the live <img> later requests.
+function tileUrl(template: string, z: number, x: number, y: number): string {
+  const subs = ["a", "b", "c"];
+  return template
+    .replace("{s}", subs[Math.abs(x + y) % subs.length])
+    .replace("{z}", String(z))
+    .replace("{x}", String(x))
+    .replace("{y}", String(y));
+}
+
+// Download every tile covering `bounds` from zoomFrom..zoomTo for the given XYZ
+// layers into the offline cache. Capped + pooled so it stays a polite, bounded
+// "save this view" action rather than a bulk scrape (OSM tile policy).
+async function cacheArea(
+  layers: { url: string; maxZoom: number }[],
+  bounds: L.LatLngBounds,
+  zoomFrom: number,
+  zoomTo: number,
+  onProgress?: (p: OfflineProgress) => void,
+): Promise<{ ok: number; fail: number; total: number }> {
+  const MAX_TILES = 1500;
+  const urls: string[] = [];
+  loop: for (let z = zoomFrom; z <= zoomTo; z++) {
+    const x0 = lon2tx(bounds.getWest(), z);
+    const x1 = lon2tx(bounds.getEast(), z);
+    const y0 = lat2ty(bounds.getNorth(), z);
+    const y1 = lat2ty(bounds.getSouth(), z);
+    for (const layer of layers) {
+      if (z > layer.maxZoom) continue;
+      for (let x = x0; x <= x1; x++)
+        for (let y = y0; y <= y1; y++) {
+          urls.push(tileUrl(layer.url, z, x, y));
+          if (urls.length >= MAX_TILES) break loop;
+        }
+    }
+  }
+  const cache = await caches.open(TILE_CACHE);
+  const total = urls.length;
+  let ok = 0, fail = 0, done = 0, i = 0;
+  const worker = async (): Promise<void> => {
+    while (i < urls.length) {
+      const url = urls[i++];
+      try {
+        const res = await fetch(url, { mode: "no-cors" });
+        await cache.put(url, res);
+        ok++;
+      } catch {
+        fail++;
+      }
+      onProgress?.({ done: ++done, total });
+    }
+  };
+  await Promise.all(Array.from({ length: 4 }, worker));
+  return { ok, fail, total };
+}
+
 // Remember which base + overlay layers the user had on, so they survive the
 // map being torn down and remounted when a new location loads.
 interface LayerPrefs { base: string; overlays: string[]; }
-const LAYER_KEY = "mccormacks.maplayers.v5";
+const LAYER_KEY = "mccormacks.maplayers.v6";
 function loadLayerPrefs(): LayerPrefs | null {
   try {
     const raw = localStorage.getItem(LAYER_KEY);
@@ -65,6 +182,7 @@ interface MountOpts {
   flow?: TidalFlow | null;
   waves?: WaveComponent[] | null;
   wind?: { speedKmh: number; dirFromDeg: number } | null;
+  trail?: TrailState | null;
   onSelect: (loc: FishingLocation) => void;
   onRemoveSaved: (id: string) => void;
 }
@@ -95,13 +213,13 @@ function animalPopup(a: TaggedAnimal): string {
 }
 
 export function mountMap(opts: MountOpts): MapApi {
-  const { container, locations, active, predators = [], presence = [], selfId, selfColor = "#36c2ce", flow = null, waves = null, wind = null, onSelect, onRemoveSaved } = opts;
+  const { container, locations, active, predators = [], presence = [], selfId, selfColor = "#36c2ce", flow = null, waves = null, wind = null, trail = null, onSelect, onRemoveSaved } = opts;
 
   const map = L.map(container, { zoomControl: true }).setView([active.lat, active.lon], active.home ? 12 : active.kind === "fresh" ? 13 : 10);
 
   // --- base layers (added below according to saved prefs) ---
-  const osm = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "© OpenStreetMap" });
-  const topo = L.tileLayer("https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png", { maxZoom: 17, attribution: "© OpenTopoMap" });
+  const osm = L.tileLayer(OSM_URL, { maxZoom: 19, attribution: "© OpenStreetMap" });
+  const topo = L.tileLayer(TOPO_URL, { maxZoom: 17, attribution: "© OpenTopoMap" });
 
   // --- depth / nautical overlays ---
   const seamarks = L.tileLayer("https://tiles.openseamap.org/seamark/{z}/{x}/{y}.png", {
@@ -114,6 +232,23 @@ export function mountMap(opts: MountOpts): MapApi {
     opacity: 0.55,
     attribution: "GEBCO bathymetry",
   } as L.WMSOptions);
+
+  // --- inland / Crown land overlays (for camping + freshwater trips) ---
+  // Crown land = the provincial (DNRR) parcels, much of it former/active forestry
+  // land where folks backcountry camp. Rendered via the ArcGIS REST export op
+  // (the service's WMS endpoint is broken); the service draws its own symbology.
+  const crownLand = arcgisExportLayer(
+    "https://nsgiwa.novascotia.ca/arcgis/rest/services/PLAN/PLANCrownLandsWM84V1/MapServer",
+    "0",
+    { opacity: 0.9, maxZoom: 19, attribution: "Crown land: GeoNOVA / NS DNRR" } as L.TileLayerOptions,
+    CROWN_RENDERER,
+  );
+  // Marked/named hiking routes (free, transparent overlay from OSM relations).
+  const hikingTrails = L.tileLayer(TRAILS_URL, {
+    maxZoom: 18,
+    opacity: 0.9,
+    attribution: '© <a href="https://waymarkedtrails.org">Waymarked Trails</a> (CC-BY-SA)',
+  });
 
   // --- ocean-colour / temperature overlays (NASA GIBS) ---
   // SST shows temperature breaks where bass/mackerel stack; chlorophyll shows
@@ -157,6 +292,7 @@ export function mountMap(opts: MountOpts): MapApi {
   // One coloured hook per member who is currently sharing their location.
   const memberLayer = L.layerGroup();
   const memberMarkers = new Map<string | number, L.Marker>();
+  const memberTrails = new Map<string | number, L.Polyline>(); // live "Indiana Jones" path per member
   const anglerIcon = (color: string) =>
     L.divIcon({ className: "", html: `<div class="mk-angler" style="--ac:${color}">🪝</div>`, iconSize: [28, 28], iconAnchor: [14, 14] });
   function renderPresence(anglers: AnglerPresence[], self?: string | number): void {
@@ -177,9 +313,28 @@ export function mountMap(opts: MountOpts): MapApi {
         m.addTo(memberLayer);
         memberMarkers.set(a.id, m);
       }
+      // The member's shared Trail-mode path, in their colour (dashed, map-style).
+      // Only drawn if they've shared their trail with US (one-way per-recipient).
+      const allowed = self != null && (a.shareWith ?? []).some((id) => String(id) === String(self));
+      const pts = allowed ? (a.trail ?? []).map((p) => [p.lat, p.lon] as [number, number]) : [];
+      let line = memberTrails.get(a.id);
+      if (pts.length > 1) {
+        if (line) line.setLatLngs(pts).setStyle({ color: a.color });
+        else {
+          line = L.polyline(pts, { color: a.color, weight: 3, opacity: 0.85, dashArray: "2 7", lineCap: "round" }).addTo(memberLayer);
+          line.bindTooltip(`${pesc(a.displayName)}'s trail`, { sticky: true });
+          memberTrails.set(a.id, line);
+        }
+      } else if (line) {
+        memberLayer.removeLayer(line);
+        memberTrails.delete(a.id);
+      }
     }
     for (const [id, m] of memberMarkers) {
       if (!seen.has(id)) { memberLayer.removeLayer(m); memberMarkers.delete(id); }
+    }
+    for (const [id, line] of memberTrails) {
+      if (!seen.has(id)) { memberLayer.removeLayer(line); memberTrails.delete(id); }
     }
   }
   renderPresence(presence, selfId);
@@ -202,6 +357,8 @@ export function mountMap(opts: MountOpts): MapApi {
     "Chlorophyll": chlorophyll,
     "Saltwater spots": saltLayer,
     "Freshwater spots": freshLayer,
+    "Crown land": crownLand,
+    "Hiking trails": hikingTrails,
     "Sea charts / depths": seamarks,
     "Bathymetry (GEBCO)": gebco,
     "Waterway links": waterLayer,
@@ -214,7 +371,7 @@ export function mountMap(opts: MountOpts): MapApi {
   const onOverlays = prefs
     ? prefs.overlays
     : active.kind === "fresh"
-    ? ["Guild members", "Waterway links", "Saltwater spots", "Freshwater spots"]
+    ? ["Guild members", "Crown land", "Hiking trails", "Waterway links", "Freshwater spots"]
     : ["Guild members", "Tidal flow (animated)", "Sea charts / depths", "Waterway links", "Ocean predators", "Saltwater spots", "Freshwater spots"];
   for (const name of Object.keys(overlays)) if (onOverlays.includes(name)) overlays[name].addTo(map);
 
@@ -342,11 +499,46 @@ export function mountMap(opts: MountOpts): MapApi {
       if (!selfRing) selfRing = L.circle(selfLatLng, { radius: accuracy, color: selfColor, weight: 1, opacity: 0.4, fillColor: selfColor, fillOpacity: 0.08 }).addTo(map);
       else { selfRing.setLatLng(selfLatLng); selfRing.setRadius(accuracy); }
     }
+    updateCampLine();
   }
   function clearSelf() {
     selfDot?.remove(); selfRing?.remove();
     selfDot = null; selfRing = null; selfLatLng = null;
+    updateCampLine();
   }
+
+  // --- Trail / Camp mode overlay: breadcrumb track + base camp + POIs, plus a
+  //     dashed "line back to camp" from your live position (so you're never lost) ---
+  const campIcon = L.divIcon({ className: "", html: `<div class="mk-camp">⛺</div>`, iconSize: [30, 30], iconAnchor: [15, 28] });
+  const poiIcon = (emoji: string) => L.divIcon({ className: "", html: `<div class="mk-poi">${emoji}</div>`, iconSize: [24, 24], iconAnchor: [12, 12] });
+  const trailLayer = L.featureGroup().addTo(map);
+  let campLatLng: L.LatLng | null = null;
+  let campLine: L.Polyline | null = null;
+  function updateCampLine() {
+    campLine?.remove();
+    campLine = null;
+    if (campLatLng && selfLatLng) {
+      campLine = L.polyline([selfLatLng, campLatLng], { color: "#ffcf5c", weight: 2, opacity: 0.85, dashArray: "6 8", pane: "overlayPane" }).addTo(trailLayer);
+    }
+  }
+  function renderTrail(t: TrailState | null) {
+    trailLayer.clearLayers();
+    campLine = null;
+    campLatLng = t?.baseCamp ? L.latLng(t.baseCamp.lat, t.baseCamp.lon) : null;
+    if (t && t.points.length > 1) {
+      L.polyline(t.points.map((p) => [p.lat, p.lon] as [number, number]), { color: "#ff8a3d", weight: 3, opacity: 0.9 }).addTo(trailLayer);
+    }
+    for (const poi of t?.pois ?? []) {
+      const m = L.marker([poi.lat, poi.lon], { icon: poiIcon(poi.emoji), zIndexOffset: 650 }).addTo(trailLayer);
+      m.bindTooltip(`${poi.emoji} ${pesc(poi.name)}`, { direction: "top" });
+    }
+    if (t?.baseCamp && campLatLng) {
+      const m = L.marker(campLatLng, { icon: campIcon, zIndexOffset: 700 }).addTo(trailLayer);
+      m.bindTooltip(`⛺ ${pesc(t.baseCamp.name)} (base camp)`, { direction: "top" });
+    }
+    updateCampLine();
+  }
+  renderTrail(trail);
 
   setTimeout(() => map.invalidateSize(), 60);
 
@@ -361,6 +553,11 @@ export function mountMap(opts: MountOpts): MapApi {
     setPresence: (anglers, self) => renderPresence(anglers, self),
     setSelfLocation: (lat, lon, accuracy) => setSelf(lat, lon, accuracy),
     clearSelfLocation: () => clearSelf(),
+    setTrail: (t) => renderTrail(t),
+    fitTrail: () => {
+      const b = trailLayer.getBounds();
+      if (b.isValid()) map.fitBounds(b.pad(0.25));
+    },
     setFlow: (f) => flowLayer.setFlow(f),
     setWaves: (waveComps) => flowLayer.setWaves(waveComps),
     setWind: (s, d) => flowLayer.setWind(s, d),
@@ -368,6 +565,14 @@ export function mountMap(opts: MountOpts): MapApi {
       if (!selfLatLng) return false;
       map.flyTo(selfLatLng, Math.max(map.getZoom(), 14));
       return true;
+    },
+    cacheVisibleArea: (onProgress) => {
+      if (typeof caches === "undefined") return Promise.reject(new Error("offline caching not supported here"));
+      const useTopo = map.hasLayer(topo);
+      const layers = [{ url: useTopo ? TOPO_URL : OSM_URL, maxZoom: useTopo ? 17 : 19 }];
+      if (map.hasLayer(hikingTrails)) layers.push({ url: TRAILS_URL, maxZoom: 18 });
+      const z0 = Math.round(map.getZoom());
+      return cacheArea(layers, map.getBounds(), z0, Math.min(z0 + 2, layers[0].maxZoom), onProgress);
     },
     resize: () => map.invalidateSize(),
     destroy: () => map.remove(),

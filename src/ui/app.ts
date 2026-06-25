@@ -8,15 +8,16 @@ import { generateBriefing } from "../engine/briefing";
 import { tideChartSVG, gaugeSVG, scoreColor } from "./charts";
 import { loadLog, addRecord, deleteRecord, newId, seedSamples, exportJSON, importJSON } from "../store/log";
 import { SPECIES, FRESH_SPECIES, weatherLabel, compassDir } from "../config";
-import { loadNSLocations, getActiveLocation, setActiveLocation, locationForPoint, HOME } from "../services/locations";
+import { loadNSLocations, getActiveLocation, setActiveLocation, locationForPoint, haversineKm, HOME } from "../services/locations";
 import { loadSpots, addSpot, removeSpot } from "../store/spots";
+import { loadTrail, saveTrail, emptyTrail, maybeAppendPoint, bearingDeg, trailLengthKm, downsampleTrail, loadTrailHistory, archiveTrail, deleteArchivedTrail, loadShareWith, saveShareWith, type TrailState, type ArchivedTrail } from "../store/trail";
 import type { MapApi } from "./map";
 import type { TidalFlow } from "./flow";
 import { moonEmoji, moonInfo } from "../services/astronomy";
 import { fmtTime, fmtRange, fmtWeekday, fmtDate } from "../util/format";
 import type { Bundle, ScoredHour, CatchRecord, HourPoint, FishingLocation, GuildUser, AnglerPresence } from "../types";
-import { fetchMe, logout as apiLogout, getCurrentUser, syncTripSave, syncTripDelete } from "../services/api";
-import { connect as presenceConnect, disconnect as presenceDisconnect, onRoster, toggleSharing, loadSharePref } from "../services/presence";
+import { fetchMe, logout as apiLogout, getCurrentUser, syncTripSave, syncTripDelete, listMembers } from "../services/api";
+import { connect as presenceConnect, disconnect as presenceDisconnect, onRoster, toggleSharing, loadSharePref, setSharedTrail as presenceSetTrail, setShareTargets as presenceSetTargets } from "../services/presence";
 import { renderLogin } from "./login";
 import { openAdminPanel } from "./admin";
 
@@ -32,12 +33,13 @@ interface State {
   saved: FishingLocation[];
   user: GuildUser | null;
   presence: AnglerPresence[];
+  members: GuildUser[]; // full guild roster (for the Trail-mode member lookup)
 }
 
 const state: State = {
   bundle: null, scored: [], log: loadLog(), dayOffset: 0, tab: "overview",
   error: null, location: getActiveLocation(), locations: [HOME], saved: loadSpots(),
-  user: null, presence: [],
+  user: null, presence: [], members: [],
 };
 
 let mapApi: MapApi | null = null;
@@ -50,6 +52,7 @@ function allLocations(): FishingLocation[] {
 const TABS = [
   ["overview", "Summary"],
   ["map", "Map / Location"],
+  ["trails", "Trail History"],
   ["tide", "Tide & Hourly"],
   ["species", "Species"],
   ["hotspots", "Hotspots"],
@@ -73,6 +76,14 @@ export async function start() {
   state.user = user;
   startPresence();
   startAutoRefresh();
+  presenceSetTargets(shareWith); // so recipients are known as soon as sharing starts
+  resumeTrailIfActive();
+  // Load the guild roster (any active member may) for the Trail-mode lookup; the
+  // Node backend may refuse non-admins (graceful: lookup falls back to sharers).
+  listMembers().then((m) => {
+    state.members = m;
+    if (state.tab === "map") refreshTrailPanel();
+  }).catch(() => {});
 
   root().innerHTML = `<div class="boot"><img class="boot-logo" src="/fishing.png" width="64" height="64"/><div class="boot-spinner"></div><div class="boot-text">Reading the water...</div></div>`;
   try {
@@ -106,6 +117,9 @@ function startPresence() {
     mapApi?.setPresence(anglers, state.user?.id);
     const badge = document.getElementById("memberbadge");
     if (badge) badge.outerHTML = memberBadge();
+    // Refresh the Trail-mode lookup so live "sharing/distance" stays current, but
+    // not while the user is mid-search (would steal focus / reset their query).
+    if (state.tab === "map" && document.activeElement?.id !== "guild-search") refreshTrailPanel();
   });
 }
 
@@ -189,6 +203,92 @@ function stopSelfWatch() {
   if (selfWatchId != null) { navigator.geolocation.clearWatch(selfWatchId); selfWatchId = null; }
 }
 
+/* ---------- TRAIL / CAMP MODE ---------- */
+// A self-paced hiking mode: records a breadcrumb, keeps the screen awake so the
+// GPS keeps logging in-hand, and always shows the way back to base camp. The web
+// platform can't track with the screen off / app backgrounded (no background-geo
+// API on iOS, throttled on Android), so we hold a screen Wake Lock instead and
+// tell the user to keep the app open. The same code carries over to a future
+// native (Capacitor) shell that *can* track in the pocket.
+let trail: TrailState = loadTrail();
+let trailHistory: ArchivedTrail[] = loadTrailHistory();
+let viewingHistory: ArchivedTrail | null = null; // a past trip being replayed on the map
+let shareWith: string[] = loadShareWith(); // member ids you share your live trail with
+let trailWatchId: number | null = null;
+
+// Push the current trail + share targets to the live feed. The trail is only sent
+// when you've chosen at least one recipient (otherwise nobody should see it).
+function applyTrailShare(): void {
+  presenceSetTargets(shareWith);
+  presenceSetTrail(shareWith.length && trail.active ? downsampleTrail(trail.points) : null);
+}
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let wakeLock: any = null;
+
+async function acquireWakeLock() {
+  try {
+    const wl = (navigator as unknown as { wakeLock?: { request(t: string): Promise<unknown> } }).wakeLock;
+    if (wl?.request) wakeLock = await wl.request("screen");
+  } catch { /* unsupported / denied - tracking still works while the screen is on */ }
+}
+function releaseWakeLock() {
+  try { wakeLock?.release?.(); } catch { /* ignore */ }
+  wakeLock = null;
+}
+// Wake locks drop when the tab is hidden; re-grab it when we come back into view.
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && trail.active && !wakeLock) acquireWakeLock();
+});
+
+function startTrailWatch() {
+  if (!("geolocation" in navigator) || trailWatchId != null) return;
+  trailWatchId = navigator.geolocation.watchPosition(
+    (pos) => {
+      const lat = pos.coords.latitude, lon = pos.coords.longitude, acc = pos.coords.accuracy;
+      selfLoc = { lat, lon, acc };
+      mapApi?.setSelfLocation(lat, lon, acc);
+      if (trail.active && maybeAppendPoint(trail, lat, lon, acc)) {
+        saveTrail(trail);
+        if (!viewingHistory) mapApi?.setTrail(trail); // don't clobber a history replay
+        presenceSetTrail(shareWith.length ? downsampleTrail(trail.points) : null); // only to chosen recipients
+      }
+      updateTrailReadout();
+    },
+    () => { /* permission denied / unavailable */ },
+    { enableHighAccuracy: true, maximumAge: 2000, timeout: 20000 }
+  );
+}
+function stopTrailWatch() {
+  if (trailWatchId != null) { navigator.geolocation.clearWatch(trailWatchId); trailWatchId = null; }
+}
+
+async function startTrailMode() {
+  trail.active = true;
+  if (!trail.startedAt) trail.startedAt = Date.now();
+  saveTrail(trail);
+  await acquireWakeLock();
+  startTrailWatch();
+  mapApi?.setTrail(trail);
+  applyTrailShare();
+  refreshTrailPanel();
+  toast("Trail mode on. Keep the app open (screen stays awake); your breadcrumb is recording.");
+}
+function stopTrailMode() {
+  trail.active = false;
+  saveTrail(trail);
+  releaseWakeLock();
+  stopTrailWatch();
+  presenceSetTrail(null); // stop broadcasting the live line when paused
+  refreshTrailPanel();
+  toast("Trail mode paused. Your breadcrumb, camp and marks are saved.");
+}
+// After a reload mid-hike, quietly resume recording (best-effort wake lock).
+function resumeTrailIfActive() {
+  if (!trail.active) return;
+  acquireWakeLock();
+  startTrailWatch();
+}
+
 // Mobile fullscreen for the map / tide chart / handbook. CSS-overlay based
 // (works on iOS, where the native Fullscreen API doesn't apply to arbitrary
 // elements, and gives true fullscreen in the installed PWA). The exit button is
@@ -257,6 +357,18 @@ function esc(s: string): string {
   return (s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]!));
 }
 
+// Turn a load error into an accurate hint. A 4xx is the SERVER rejecting the
+// request, not a connection problem; a rate limit just needs time, not a reload.
+function loadErrorHint(err: string): string {
+  if (/429|limit exceeded|too many requests/i.test(err)) {
+    return "Open-Meteo's free per-IP request quota is temporarily used up (it resets within the hour/day). Wait a few minutes before retrying, and avoid rapid reloads - any spot you already opened still shows its last data.";
+  }
+  if (/\b4\d\d\b|rejected|invalid|out of range/i.test(err)) {
+    return "The weather service rejected the request - this is not a connection problem. If you'd just dropped a pin, try a different spot or reload home.";
+  }
+  return "Check your internet connection - the app pulls live tides (DFO/CHS) and weather (Open-Meteo).";
+}
+
 function render() {
   teardownMap();
   clearFullscreen();
@@ -264,7 +376,7 @@ function render() {
   if (state.error || !b) {
     root().innerHTML = `<div class="card" style="margin-top:40px">
       <h2>Couldn't load live data</h2>
-      <p class="muted">${esc(state.error ?? "Unknown error")}. Check your internet connection - the app pulls live tides (DFO/CHS) and weather (Open-Meteo).</p>
+      <p class="muted">${esc(state.error ?? "Unknown error")}. ${loadErrorHint(state.error ?? "")}</p>
       <button class="btn primary" data-action="refresh">Retry</button></div>`;
     bind();
     return;
@@ -361,6 +473,7 @@ async function postRender() {
     flow: tidalFlowNow(),
     waves: seaStateNow()?.components ?? null,
     wind: windNow(),
+    trail: viewingHistory ?? trail,
     onSelect: (loc) => selectLocation(loc),
     onRemoveSaved: (id) => {
       state.saved = removeSpot(id);
@@ -370,6 +483,7 @@ async function postRender() {
   });
   startSelfWatch();
   if (selfLoc) mapApi.setSelfLocation(selfLoc.lat, selfLoc.lon, selfLoc.acc);
+  if (viewingHistory) mapApi.fitTrail();
 }
 
 // Placing the hook (clicking the map / a marker / device location) immediately
@@ -493,6 +607,7 @@ function renderTab(b: Bundle, ctx: DayContext): string {
   switch (state.tab) {
     case "overview": return tabOverview(b, ctx);
     case "map": return tabMap(b);
+    case "trails": return tabTrailHistory();
     case "tide": return tabTide(b, ctx);
     case "species": return tabSpecies(b, ctx);
     case "hotspots": return tabHotspots(ctx);
@@ -546,6 +661,7 @@ function tabMap(b: Bundle): string {
       <span class="muted">Fishing: <b>${esc(b.location.name)}</b> <span class="muted">${esc(b.location.area)}</span></span>
       <span class="flex" style="flex-wrap:wrap">
         <button class="btn small" data-action="center-self">📍 Find me</button>
+        <button class="btn small" data-action="save-offline" title="Download this map view so it works with no signal in the backcountry">⬇ Save offline</button>
         <button class="btn small mobile-only" data-action="map-fs">⛶ Fullscreen</button>
         ${b.location.kind !== "fresh" && b.predators.length ? `<button class="btn small" data-action="fit-preds">🦈 Show ${b.predators.length} tagged animals</button>` : ""}
         <button id="map-save" class="btn small" data-action="save-spot" ${b.location.saved ? "disabled" : ""}>＋ Save this spot</button>
@@ -566,7 +682,8 @@ function tabMap(b: Bundle): string {
     </div>
     <p class="note-sm">Your own <b>live position</b> dot follows you for orientation while the Map tab is open, whether or not you're sharing. Tap <b>📍 Find me</b> to recentre. Turn on <b>📡 Share location</b> (top of the page) to also let the guild see your position live. Use the layers control (top-right of the map) to toggle Saltwater spots, Freshwater spots, Guild members, Sea charts / depths, Bathymetry and Waterway links; turn off the spot layers to see the whole map.</p>
     ${savedSpotsList()}
-  </div>`;
+  </div>
+  ${trailPanel()}`;
 }
 
 function savedSpotsList(): string {
@@ -580,6 +697,202 @@ function savedSpotsList(): string {
       </span>
     </div>`).join("")}
   </div>`;
+}
+
+function fmtDur(ms: number): string {
+  const m = Math.floor(ms / 60000), h = Math.floor(m / 60);
+  return h > 0 ? `${h}h ${m % 60}m` : `${m}m`;
+}
+
+// Distance + bearing back to base camp, relative to map-north (no device heading).
+function campCompassHTML(): string {
+  if (!trail.baseCamp) return `<p class="note-sm muted" style="margin:6px 0">No base camp yet. Drop one so you always have a bearing back.</p>`;
+  if (!selfLoc) return `<p class="note-sm" style="margin:6px 0">⛺ <b>${esc(trail.baseCamp.name)}</b> set. Waiting for a GPS fix to point the way back...</p>`;
+  const km = haversineKm(selfLoc.lat, selfLoc.lon, trail.baseCamp.lat, trail.baseCamp.lon);
+  const brg = bearingDeg(selfLoc.lat, selfLoc.lon, trail.baseCamp.lat, trail.baseCamp.lon);
+  const dist = km < 1 ? `${Math.round(km * 1000)} m` : `${km.toFixed(2)} km`;
+  return `<div class="camp-compass">
+    <span class="camp-arrow" style="transform:rotate(${brg}deg)">⬆</span>
+    <span>⛺ <b>${esc(trail.baseCamp.name)}</b> is <b>${dist}</b> ${compassDir(brg)} <span class="muted">(${Math.round(brg)}° from north)</span></span>
+  </div>`;
+}
+
+function trailLiveHTML(): string {
+  const dur = trail.startedAt ? fmtDur(Date.now() - trail.startedAt) : "-";
+  return `<div class="trail-stats">
+      <span>${trail.active ? "🟢 recording" : "⏸ paused"}</span>
+      <span>⏱ ${dur}</span>
+      <span>📏 ${trailLengthKm(trail).toFixed(2)} km</span>
+      <span>· ${trail.points.length} pts</span>
+    </div>${campCompassHTML()}`;
+}
+
+function poiListHTML(): string {
+  if (!trail.pois.length) return "";
+  return `<div class="mt"><h4 class="trail-sub">Marked spots</h4>
+    ${trail.pois.map((p) => `<div class="flex spread trail-row">
+      <button class="btn small ghost" data-action="trail-gotopoi" data-id="${esc(p.id)}">${p.emoji} ${esc(p.name)}</button>
+      <button class="btn small danger" data-action="trail-rmpoi" data-id="${esc(p.id)}">✕</button>
+    </div>`).join("")}
+  </div>`;
+}
+
+// The chips of people you currently share your trail with.
+function shareChipsHTML(): string {
+  if (!shareWith.length) {
+    return `<p class="note-sm muted" style="margin:4px 0 8px">You're not sharing your trail with anyone yet. Tap a member below to show your live trail on their map.</p>`;
+  }
+  const chips = shareWith.map((id) => {
+    const m = state.members.find((x) => String(x.id) === id);
+    const a = state.presence.find((x) => String(x.id) === id);
+    const name = m?.displayName ?? a?.displayName ?? "Member";
+    const color = m?.color ?? a?.color ?? "#36c2ce";
+    return `<span class="share-chip"><span class="legend-dot" style="background:${esc(color)}"></span>${esc(name)}<button class="chip-x" data-action="guild-share-remove" data-id="${esc(id)}" title="Stop sharing with ${esc(name)}">×</button></span>`;
+  }).join("");
+  return `<div class="share-list">${chips}</div>`;
+}
+
+function guildLookupHTML(): string {
+  const meId = state.user?.id;
+  // live position by member id (only those currently sharing)
+  const live = new Map(state.presence.filter((a) => a.lat != null && a.lon != null).map((a) => [String(a.id), a]));
+  // Prefer the full roster; if it didn't load (e.g. Node non-admin), fall back to
+  // whoever is currently sharing so the lookup still shows something useful.
+  const roster = state.members.filter((m) => m.id !== meId && m.active !== false);
+  const list = roster.length
+    ? roster.map((m) => ({ id: m.id, displayName: m.displayName, color: m.color }))
+    : state.presence.filter((a) => a.id !== meId).map((a) => ({ id: a.id, displayName: a.displayName, color: a.color }));
+  list.sort((a, b) => (live.has(String(b.id)) ? 1 : 0) - (live.has(String(a.id)) ? 1 : 0)); // sharers first
+
+  const rows = list.map((m) => {
+    const idStr = String(m.id);
+    const a = live.get(idStr);
+    const shared = shareWith.includes(idStr);
+    let right: string;
+    if (a) {
+      let dist = "sharing live";
+      if (selfLoc) {
+        const km = haversineKm(selfLoc.lat, selfLoc.lon, a.lat, a.lon);
+        const brg = bearingDeg(selfLoc.lat, selfLoc.lon, a.lat, a.lon);
+        dist = `${km < 1 ? `${Math.round(km * 1000)} m` : `${km.toFixed(1)} km`} ${compassDir(brg)}`;
+      }
+      right = `<button class="btn small ghost" data-action="guild-goto" data-id="${esc(idStr)}" title="Show on map">📍 ${dist}</button>`;
+    } else {
+      right = `<span class="muted" style="font-size:12px">not sharing</span>`;
+    }
+    return `<div class="flex spread trail-row" data-member-row data-name="${esc(m.displayName.toLowerCase())}">
+      <button class="btn small ${shared ? "primary" : "ghost"}" data-action="guild-share-toggle" data-id="${esc(idStr)}" title="${shared ? "Stop sharing your trail with them" : "Share your trail with them"}">${shared ? "✓ " : "+ "}<span class="legend-dot" style="background:${esc(m.color)}"></span> ${esc(m.displayName)}</button>
+      ${right}
+    </div>`;
+  }).join("");
+  return `<div class="mt"><h4 class="trail-sub">Sharing my trail with</h4>
+    ${shareChipsHTML()}
+    <h4 class="trail-sub">Add / find a guild member</h4>
+    <input id="guild-search" class="trail-search" type="search" placeholder="Search guild members..." />
+    ${list.length ? rows : `<p class="note-sm muted" style="margin:6px 0">No other guild members yet.</p>`}
+  </div>`;
+}
+
+function trailPanel(): string {
+  if (viewingHistory) {
+    const when = viewingHistory.startedAt ? fmtDate(new Date(viewingHistory.startedAt)) : "a past trip";
+    return `
+  <div class="card trail-panel mt">
+    <div class="flex spread" style="flex-wrap:wrap;gap:8px">
+      <h3 style="margin:0">🗺 Viewing past trip</h3>
+      <button class="btn small primary" data-action="trail-view-exit">↩ Return to live trail</button>
+    </div>
+    <p class="note-sm">Replaying your trip from <b>${esc(when)}</b> - ${trailLengthKm(viewingHistory).toFixed(2)} km, ${viewingHistory.points.length} points. Your live recording isn't affected.</p>
+  </div>`;
+  }
+  const active = trail.active;
+  return `
+  <div class="card trail-panel mt">
+    <div class="flex spread" style="flex-wrap:wrap;gap:8px">
+      <h3 style="margin:0">🥾 Trail / Camp mode</h3>
+      <button class="btn small ${active ? "primary" : ""}" data-action="trail-toggle">${active ? "⏸ Pause tracking" : "▶ Start trail mode"}</button>
+    </div>
+    <p class="note-sm">Records a breadcrumb and keeps the screen awake so it logs while you hike. ${active ? "" : "Web apps can't track with the screen off, so keep the app open while moving."}</p>
+    <div id="trail-live">${trailLiveHTML()}</div>
+    <div class="flex" style="flex-wrap:wrap;gap:6px;margin-top:8px">
+      <button class="btn small" data-action="trail-camp">⛺ Set base camp here</button>
+      <button class="btn small" data-action="trail-poi">📍 Mark this spot</button>
+      ${trail.baseCamp ? `<button class="btn small" data-action="trail-tocamp">🧭 Centre on camp</button>` : ""}
+      ${(trail.points.length || trail.pois.length || trail.baseCamp) ? `<button class="btn small" data-action="trail-save">💾 Save trip</button>
+      <button class="btn small danger" data-action="trail-clear">🗑 Clear trip</button>` : ""}
+    </div>
+    ${poiListHTML()}
+    ${guildLookupHTML()}
+  </div>`;
+}
+
+// Live-update the trail stats + camp compass without a full re-render (which would
+// remount the map). Called on every GPS tick.
+function updateTrailReadout(): void {
+  const el = document.getElementById("trail-live");
+  if (el) el.innerHTML = trailLiveHTML();
+}
+
+// Refresh the whole trail panel in place (POI list, buttons, stats) WITHOUT a full
+// render(), so the map keeps your current pan/zoom while you drop marks mid-hike.
+function refreshTrailPanel(): void {
+  const old = document.querySelector(".trail-panel");
+  if (!old) return;
+  const prevQuery = (document.getElementById("guild-search") as HTMLInputElement | null)?.value ?? "";
+  const tmp = document.createElement("div");
+  tmp.innerHTML = trailPanel().trim();
+  const fresh = tmp.firstElementChild as HTMLElement | null;
+  if (!fresh) return;
+  old.replaceWith(fresh);
+  fresh.querySelectorAll<HTMLElement>("[data-action]").forEach((el) =>
+    el.addEventListener("click", (e) => handleAction(el.dataset.action!, el, e)));
+  attachTrailSearch();
+  // keep any in-progress member search applied after a live roster refresh
+  const inp = document.getElementById("guild-search") as HTMLInputElement | null;
+  if (inp && prevQuery) { inp.value = prevQuery; inp.dispatchEvent(new Event("input")); }
+}
+
+function attachTrailSearch(): void {
+  const inp = document.getElementById("guild-search") as HTMLInputElement | null;
+  if (!inp) return;
+  inp.oninput = () => {
+    const q = inp.value.trim().toLowerCase();
+    document.querySelectorAll<HTMLElement>("[data-member-row]").forEach((row) => {
+      row.style.display = !q || (row.dataset.name ?? "").includes(q) ? "" : "none";
+    });
+  };
+}
+
+/* ---------- TRAIL HISTORY ---------- */
+function tabTrailHistory(): string {
+  if (!trailHistory.length) {
+    return `<div class="card">
+      <h2>Trail History</h2>
+      <p class="muted">No saved trips yet. Open the <b>Map / Location</b> tab, start <b>Trail mode</b>, walk your route, then tap <b>End trip</b> to save it here. Each trip keeps your breadcrumb path, base camp and marked spots so you can replay where you've been.</p>
+    </div>`;
+  }
+  const rows = trailHistory.map((t) => {
+    const when = t.startedAt ? fmtDate(new Date(t.startedAt)) : "Trip";
+    const dur = (t.startedAt && t.endedAt) ? fmtDur(t.endedAt - t.startedAt) : "-";
+    return `<div class="card trail-hist">
+      <div class="flex spread" style="flex-wrap:wrap;gap:8px">
+        <div>
+          <b>${esc(when)}</b>${t.baseCamp ? ` <span class="muted">· ⛺ ${esc(t.baseCamp.name)}</span>` : ""}
+          <div class="trail-stats" style="margin-top:4px">
+            <span>⏱ ${dur}</span><span>📏 ${trailLengthKm(t).toFixed(2)} km</span><span>· ${t.points.length} pts</span>${t.pois.length ? `<span>· 📍 ${t.pois.length}</span>` : ""}
+          </div>
+        </div>
+        <span class="flex" style="flex-wrap:wrap">
+          <button class="btn small" data-action="trail-view" data-id="${esc(t.id)}">🗺 Show on map</button>
+          <button class="btn small danger" data-action="trail-del" data-id="${esc(t.id)}">Delete</button>
+        </span>
+      </div>
+    </div>`;
+  }).join("");
+  return `<div class="card">
+    <h2>Trail History</h2>
+    <p class="muted" style="font-size:13px">Your saved trips (this device). Tap <b>Show on map</b> to replay a route; the live guild map shows other sharing members' trails in their own colour.</p>
+  </div>${rows}`;
 }
 
 /* ---------- OVERVIEW ---------- */
@@ -1056,6 +1369,7 @@ function bind() {
   const form = document.getElementById("logform") as HTMLFormElement | null;
   if (form) form.addEventListener("submit", onLogSubmit);
   attachPicker();
+  attachTrailSearch();
 }
 
 function attachPicker() {
@@ -1091,6 +1405,131 @@ async function handleAction(action: string, el: HTMLElement, e: Event) {
     case "center-self":
       if (!mapApi?.centerOnSelf()) toast("Waiting for your GPS fix... allow location access");
       break;
+    case "save-offline": {
+      if (!mapApi) break;
+      const btn = el as HTMLButtonElement;
+      const orig = btn.textContent;
+      btn.disabled = true;
+      try {
+        const r = await mapApi.cacheVisibleArea((p) => { btn.textContent = `⬇ ${p.done}/${p.total}`; });
+        toast(`Saved ${r.ok} map tiles for offline use${r.fail ? ` (${r.fail} failed)` : ""}. This area now works with no signal.`);
+      } catch (err) {
+        toast(`Offline save failed: ${(err as Error).message}`);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = orig;
+      }
+      break;
+    }
+    case "trail-toggle":
+      if (trail.active) stopTrailMode();
+      else await startTrailMode();
+      break;
+    case "trail-camp": {
+      if (!selfLoc) { toast("Waiting for your GPS fix - tap 📍 Find me first."); break; }
+      const name = prompt("Name your base camp:", trail.baseCamp?.name || "Base camp");
+      if (name == null) break;
+      trail.baseCamp = { lat: selfLoc.lat, lon: selfLoc.lon, name: name.trim() || "Base camp" };
+      saveTrail(trail);
+      mapApi?.setTrail(trail);
+      refreshTrailPanel();
+      toast("Base camp set - you'll always have a bearing back to it.");
+      break;
+    }
+    case "trail-poi": {
+      if (!selfLoc) { toast("Waiting for your GPS fix - tap 📍 Find me first."); break; }
+      const name = prompt("Name this spot (e.g. good pool, fallen tree, lookout):", "");
+      if (name == null) break;
+      trail.pois.push({ id: newId(), lat: selfLoc.lat, lon: selfLoc.lon, name: name.trim() || "Spot", emoji: "📍", t: Date.now() });
+      saveTrail(trail);
+      mapApi?.setTrail(trail);
+      refreshTrailPanel();
+      toast("Spot marked.");
+      break;
+    }
+    case "trail-tocamp":
+      if (trail.baseCamp) mapApi?.flyTo(trail.baseCamp.lat, trail.baseCamp.lon, 15);
+      break;
+    case "trail-view": {
+      const t = trailHistory.find((x) => x.id === el.dataset.id);
+      if (!t) break;
+      viewingHistory = t;
+      state.tab = "map";
+      render(); // remounts the map with this trip; postRender fits it
+      break;
+    }
+    case "trail-view-exit":
+      viewingHistory = null;
+      render();
+      break;
+    case "trail-del":
+      trailHistory = deleteArchivedTrail(el.dataset.id!);
+      if (viewingHistory && viewingHistory.id === el.dataset.id) viewingHistory = null;
+      render();
+      break;
+    case "trail-gotopoi": {
+      const p = trail.pois.find((x) => x.id === el.dataset.id);
+      if (p) mapApi?.flyTo(p.lat, p.lon, 16);
+      break;
+    }
+    case "trail-rmpoi": {
+      const id = el.dataset.id;
+      trail.pois = trail.pois.filter((p) => p.id !== id);
+      saveTrail(trail);
+      mapApi?.setTrail(trail);
+      refreshTrailPanel();
+      break;
+    }
+    case "trail-save": {
+      if (!trail.points.length && !trail.pois.length && !trail.baseCamp) { toast("Nothing to save yet - start walking."); break; }
+      trailHistory = archiveTrail(trail); // snapshot to history; keep recording
+      refreshTrailPanel();
+      toast("Trip saved to Trail History. You can keep going or clear it.");
+      break;
+    }
+    case "trail-clear":
+      if (confirm("Clear the current trip? Tap Save trip first if you want to keep it - this can't be undone.")) {
+        stopTrailWatch();
+        releaseWakeLock();
+        presenceSetTrail(null);
+        trail = emptyTrail();
+        saveTrail(trail);
+        mapApi?.setTrail(trail);
+        refreshTrailPanel();
+        toast("Trip cleared.");
+      }
+      break;
+    case "guild-share-toggle": {
+      const id = el.dataset.id!;
+      const adding = !shareWith.includes(id);
+      shareWith = adding ? [...shareWith, id] : shareWith.filter((x) => x !== id);
+      saveShareWith(shareWith);
+      applyTrailShare();
+      refreshTrailPanel();
+      if (adding && !loadSharePref()) toast("Added. Turn on 📡 Share location (top of page) so your trail reaches them.");
+      break;
+    }
+    case "guild-share-remove": {
+      const id = el.dataset.id!;
+      shareWith = shareWith.filter((x) => x !== id);
+      saveShareWith(shareWith);
+      applyTrailShare();
+      refreshTrailPanel();
+      break;
+    }
+    case "guild-goto": {
+      const a = state.presence.find((m) => String(m.id) === el.dataset.id);
+      if (!a) break;
+      mapApi?.flyTo(a.lat, a.lon, 15);
+      if (selfLoc) {
+        const km = haversineKm(selfLoc.lat, selfLoc.lon, a.lat, a.lon);
+        const brg = bearingDeg(selfLoc.lat, selfLoc.lon, a.lat, a.lon);
+        toast(`${a.displayName}: ${km < 1 ? `${Math.round(km * 1000)} m` : `${km.toFixed(1)} km`} ${compassDir(brg)} of you.`);
+      } else {
+        toast(`Showing ${a.displayName} on the map.`);
+      }
+      break;
+    }
     case "map-fs": {
       const host = document.getElementById("mapcanvas");
       if (host) setFullscreen(host, !host.classList.contains("fs"), () => mapApi?.resize());

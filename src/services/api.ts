@@ -139,6 +139,14 @@ export async function listUsers(): Promise<GuildUser[]> {
   if (useFirebase) return (await fb()).listUsers();
   return (await apiNode<{ users: GuildUser[] }>("/api/users")).users;
 }
+
+// Public guild roster, readable by ANY active member (for the Trail-mode member
+// lookup). Firebase serves the users collection to all members; the Node backend
+// gates /api/users to admins, so it has a separate non-admin /api/members route.
+export async function listMembers(): Promise<GuildUser[]> {
+  if (useFirebase) return (await fb()).listUsers();
+  return (await apiNode<{ members: GuildUser[] }>("/api/members")).members;
+}
 export async function createUser(payload: {
   username: string;
   password: string;

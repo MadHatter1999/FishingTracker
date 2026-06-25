@@ -29,9 +29,33 @@ let geoWatchId: number | null = null;
 let sharing = false;
 let reconnectTimer: number | undefined;
 let lastSent = 0;
+// Downsampled trail shared while in Trail mode (Node backend; Firebase keeps its
+// own copy). Included on each location update so others can draw the live path.
+let sharedTrail: { lat: number; lon: number }[] | null = null;
+let shareTargets: (string | number)[] = [];
 
 export function isSharing(): boolean {
   return sharing || (useFirebase && loadSharePref());
+}
+
+// Feed the member's current downsampled breadcrumb to the live feed (opt-in: only
+// actually transmitted while sharing). Pass null to clear it when a trip ends.
+export function setSharedTrail(pts: { lat: number; lon: number }[] | null): void {
+  if (useFirebase) {
+    fb().then((m) => m.setSharedTrail(pts)).catch(() => {});
+    return;
+  }
+  sharedTrail = pts && pts.length ? pts : null; // rides the next loc update
+}
+
+// The member ids you share your trail with (one-way). Travels with each update so
+// recipients can tell whether to draw your trail.
+export function setShareTargets(ids: (string | number)[]): void {
+  if (useFirebase) {
+    fb().then((m) => m.setShareTargets(ids)).catch(() => {});
+    return;
+  }
+  shareTargets = ids ?? [];
 }
 
 export function onRoster(fn: Listener): () => void {
@@ -116,7 +140,9 @@ export function disconnect(): void {
 }
 
 function sendLoc(lat: number, lon: number, accuracy?: number): void {
-  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "loc", lat, lon, accuracy }));
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: "loc", lat, lon, accuracy, trail: sharedTrail ?? undefined, shareWith: shareTargets }));
+  }
 }
 
 export function startSharing(): boolean {
