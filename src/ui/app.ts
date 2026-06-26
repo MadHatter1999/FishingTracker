@@ -810,7 +810,7 @@ function trailPanel(): string {
   return `
   <div class="card trail-panel mt">
     <div class="flex spread" style="flex-wrap:wrap;gap:8px">
-      <h3 style="margin:0">🥾 Trail / Camp mode</h3>
+      <h3 style="margin:0">Trail / Camp mode</h3>
       <button class="btn small ${active ? "primary" : ""}" data-action="trail-toggle">${active ? "⏸ Pause tracking" : "▶ Start trail mode"}</button>
     </div>
     <p class="note-sm">Records a breadcrumb and keeps the screen awake so it logs while you hike. ${active ? "" : "Web apps can't track with the screen off, so keep the app open while moving."}</p>
