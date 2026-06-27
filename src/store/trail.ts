@@ -11,6 +11,7 @@ export interface TrailPoint { lat: number; lon: number; t: number; acc?: number;
 export interface TrailPoi { id: string; lat: number; lon: number; name: string; emoji: string; t: number; }
 export interface TrailState {
   active: boolean;
+  paused: boolean; // in-progress trip, but movement tracking is held (recharge break)
   startedAt: number | null;
   points: TrailPoint[];
   baseCamp: { lat: number; lon: number; name: string } | null;
@@ -23,7 +24,7 @@ const MIN_MOVE_M = 8; // ignore sub-8m GPS jitter
 const MIN_GAP_MS = 4000; // ...but log at least this often while moving
 
 export function emptyTrail(): TrailState {
-  return { active: false, startedAt: null, points: [], baseCamp: null, pois: [] };
+  return { active: false, paused: false, startedAt: null, points: [], baseCamp: null, pois: [] };
 }
 
 export function loadTrail(): TrailState {
@@ -118,6 +119,7 @@ export function archiveTrail(t: TrailState): ArchivedTrail[] {
   const item: ArchivedTrail = {
     ...t,
     active: false,
+    paused: false,
     id: `th-${t.startedAt ?? Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
     endedAt: Date.now(),
   };

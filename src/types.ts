@@ -131,6 +131,16 @@ export interface CatchRecord {
   // auto-captured snapshot
   moonPhase?: string;
   waterTemp?: string;
+  // ---- trip context (all optional; a full record of the day) ----
+  location?: string; // spot fished (free text, defaults to active location)
+  lat?: number; // captured from the active location when it matches
+  lon?: number;
+  method?: string; // Shore / Boat / Kayak / Pier / Fly
+  party?: string; // who you fished with
+  // ---- catch & wildlife detail ----
+  bait?: string; // bait / lure used (e.g. "mackerel strip", "white grub")
+  weight?: string; // approx weight (total or biggest fish)
+  wildlife?: string; // other animals seen (seals, eagles, sharks, whales…)
 }
 
 // A catch-log trip with its owner, for the admin cross-member view (Firebase).

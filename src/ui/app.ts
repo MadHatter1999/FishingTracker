@@ -5,8 +5,9 @@ import { computeDay, type DayContext } from "../engine/context";
 import { tideVelocityAt } from "../engine/merge";
 import { buildSeaState, type SeaState } from "../engine/seastate";
 import { generateBriefing } from "../engine/briefing";
+import { trailMapSVG, svgToPngBlob } from "../util/trailmap";
 import { tideChartSVG, gaugeSVG, scoreColor } from "./charts";
-import { loadLog, addRecord, deleteRecord, newId, seedSamples, exportJSON, importJSON } from "../store/log";
+import { loadLog, addRecord, deleteRecord, newId, seedSamples, exportJSON, exportCSV, importJSON } from "../store/log";
 import { SPECIES, FRESH_SPECIES, weatherLabel, compassDir } from "../config";
 import { loadNSLocations, getActiveLocation, setActiveLocation, locationForPoint, haversineKm, HOME } from "../services/locations";
 import { loadSpots, addSpot, removeSpot } from "../store/spots";
@@ -190,6 +191,7 @@ let selfWatchId: number | null = null;
 let selfLoc: { lat: number; lon: number; acc: number } | null = null;
 function startSelfWatch() {
   if (!("geolocation" in navigator) || selfWatchId != null) return;
+  if (trail.active && trail.paused) return; // movement held - keep the marker frozen at the last point
   selfWatchId = navigator.geolocation.watchPosition(
     (pos) => {
       selfLoc = { lat: pos.coords.latitude, lon: pos.coords.longitude, acc: pos.coords.accuracy };
@@ -220,7 +222,13 @@ let trailWatchId: number | null = null;
 // when you've chosen at least one recipient (otherwise nobody should see it).
 function applyTrailShare(): void {
   presenceSetTargets(shareWith);
-  presenceSetTrail(shareWith.length && trail.active ? downsampleTrail(trail.points) : null);
+  presenceSetTrail(shareWith.length && trail.active && !trail.paused ? downsampleTrail(trail.points) : null);
+}
+
+// Last recorded breadcrumb point - where the marker holds while paused.
+function lastTrailPoint(): { lat: number; lon: number; acc: number } | null {
+  const p = trail.points[trail.points.length - 1];
+  return p ? { lat: p.lat, lon: p.lon, acc: p.acc ?? 0 } : null;
 }
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let wakeLock: any = null;
@@ -237,13 +245,14 @@ function releaseWakeLock() {
 }
 // Wake locks drop when the tab is hidden; re-grab it when we come back into view.
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible" && trail.active && !wakeLock) acquireWakeLock();
+  if (document.visibilityState === "visible" && trail.active && !trail.paused && !wakeLock) acquireWakeLock();
 });
 
 function startTrailWatch() {
   if (!("geolocation" in navigator) || trailWatchId != null) return;
   trailWatchId = navigator.geolocation.watchPosition(
     (pos) => {
+      if (trail.paused) return; // movement held - ignore fixes so the marker stays frozen
       const lat = pos.coords.latitude, lon = pos.coords.longitude, acc = pos.coords.accuracy;
       selfLoc = { lat, lon, acc };
       mapApi?.setSelfLocation(lat, lon, acc);
@@ -264,6 +273,7 @@ function stopTrailWatch() {
 
 async function startTrailMode() {
   trail.active = true;
+  trail.paused = false;
   if (!trail.startedAt) trail.startedAt = Date.now();
   saveTrail(trail);
   await acquireWakeLock();
@@ -275,16 +285,50 @@ async function startTrailMode() {
 }
 function stopTrailMode() {
   trail.active = false;
+  trail.paused = false;
   saveTrail(trail);
   releaseWakeLock();
   stopTrailWatch();
-  presenceSetTrail(null); // stop broadcasting the live line when paused
+  startSelfWatch(); // resume the live marker if it was frozen by a pause
+  presenceSetTrail(null); // stop broadcasting the live line
   refreshTrailPanel();
-  toast("Trail mode paused. Your breadcrumb, camp and marks are saved.");
+  toast("Trail mode stopped. Your breadcrumb, camp and marks are saved.");
 }
-// After a reload mid-hike, quietly resume recording (best-effort wake lock).
+
+// Pause movement: hold the trip without recording, so you can put the phone down
+// (or close the app) to recharge. The marker freezes at the last point, the screen
+// is free to sleep, and the paused state persists so it's still there next launch.
+function pauseTrail() {
+  if (!trail.active || trail.paused) return;
+  trail.paused = true;
+  saveTrail(trail);
+  stopTrailWatch();
+  stopSelfWatch();
+  releaseWakeLock();
+  presenceSetTrail(null); // stop broadcasting the live line while parked
+  const last = lastTrailPoint();
+  if (last) { selfLoc = last; mapApi?.setSelfLocation(last.lat, last.lon, last.acc); }
+  refreshTrailPanel();
+  toast("Movement paused. You can close the app to recharge - pick up right here when you're back.");
+}
+
+// Unpause: resume normal recording from wherever you are now.
+async function resumeTrail() {
+  if (!trail.active || !trail.paused) return;
+  trail.paused = false;
+  saveTrail(trail);
+  await acquireWakeLock();
+  startTrailWatch();
+  startSelfWatch();
+  applyTrailShare();
+  refreshTrailPanel();
+  toast("Tracking resumed. Your breadcrumb is recording again.");
+}
+
+// After a reload mid-hike, quietly resume recording - unless the trip was paused,
+// in which case we stay paused (the marker is frozen by postRender on map open).
 function resumeTrailIfActive() {
-  if (!trail.active) return;
+  if (!trail.active || trail.paused) return;
   acquireWakeLock();
   startTrailWatch();
 }
@@ -482,8 +526,11 @@ async function postRender() {
       render();
     },
   });
-  startSelfWatch();
-  if (selfLoc) mapApi.setSelfLocation(selfLoc.lat, selfLoc.lon, selfLoc.acc);
+  startSelfWatch(); // no-op while paused, so the marker stays put
+  // While paused, hold the marker at the last recorded point (selfLoc is empty after
+  // an app restart); otherwise show the latest live fix.
+  const frozen = trail.active && trail.paused ? (selfLoc ?? lastTrailPoint()) : selfLoc;
+  if (frozen) { selfLoc = frozen; mapApi.setSelfLocation(frozen.lat, frozen.lon, frozen.acc); }
   if (viewingHistory) mapApi.fitTrail();
 }
 
@@ -720,8 +767,9 @@ function campCompassHTML(): string {
 
 function trailLiveHTML(): string {
   const dur = trail.startedAt ? fmtDur(Date.now() - trail.startedAt) : "-";
+  const status = !trail.active ? "⚪ off" : trail.paused ? "⏸ paused" : "🟢 recording";
   return `<div class="trail-stats">
-      <span>${trail.active ? "🟢 recording" : "⏸ paused"}</span>
+      <span>${status}</span>
       <span>⏱ ${dur}</span>
       <span>📏 ${trailLengthKm(trail).toFixed(2)} km</span>
       <span>· ${trail.points.length} pts</span>
@@ -807,13 +855,21 @@ function trailPanel(): string {
   </div>`;
   }
   const active = trail.active;
+  const paused = trail.paused;
   return `
   <div class="card trail-panel mt">
     <div class="flex spread" style="flex-wrap:wrap;gap:8px">
       <h3 style="margin:0">Trail / Camp mode</h3>
-      <button class="btn small ${active ? "primary" : ""}" data-action="trail-toggle">${active ? "⏸ Pause tracking" : "▶ Start trail mode"}</button>
+      <div class="flex" style="gap:6px">
+        ${active ? (paused
+          ? `<button class="btn small primary" data-action="trail-resume">▶ Unpause</button>`
+          : `<button class="btn small" data-action="trail-pause">⏸ Pause movement</button>`) : ""}
+        <button class="btn small ${active ? "" : "primary"}" data-action="trail-toggle">${active ? "⏹ Stop trail mode" : "▶ Start trail mode"}</button>
+      </div>
     </div>
-    <p class="note-sm">Records a breadcrumb and keeps the screen awake so it logs while you hike. ${active ? "" : "Web apps can't track with the screen off, so keep the app open while moving."}</p>
+    <p class="note-sm">${paused
+      ? "⏸ Paused - your position is held at the last point. Close the app to recharge if you like; tap Unpause to carry on from where you are."
+      : "Records a breadcrumb and keeps the screen awake so it logs while you hike." + (active ? "" : " Web apps can't track with the screen off, so keep the app open while moving.")}</p>
     <div id="trail-live">${trailLiveHTML()}</div>
     <div class="flex" style="flex-wrap:wrap;gap:6px;margin-top:8px">
       <button class="btn small" data-action="trail-camp">⛺ Set base camp here</button>
@@ -869,7 +925,7 @@ function tabTrailHistory(): string {
   if (!trailHistory.length) {
     return `<div class="card">
       <h2>Trail History</h2>
-      <p class="muted">No saved trips yet. Open the <b>Map / Location</b> tab, start <b>Trail mode</b>, walk your route, then tap <b>End trip</b> to save it here. Each trip keeps your breadcrumb path, base camp and marked spots so you can replay where you've been.</p>
+      <p class="muted">No saved trips yet. Open the <b>Map / Location</b> tab, start <b>Trail mode</b>, walk your route, then tap <b>💾 Save trip</b> to keep it here. Each saved trip keeps your breadcrumb path, base camp and marked spots — replay it on the map, or export it as an image or PDF.</p>
     </div>`;
   }
   const rows = trailHistory.map((t) => {
@@ -885,14 +941,17 @@ function tabTrailHistory(): string {
         </div>
         <span class="flex" style="flex-wrap:wrap">
           <button class="btn small" data-action="trail-view" data-id="${esc(t.id)}">🗺 Show on map</button>
+          <button class="btn small" data-action="trail-img" data-id="${esc(t.id)}" title="Save this trip map as a PNG image">🖼 Image</button>
+          <button class="btn small" data-action="trail-pdf" data-id="${esc(t.id)}" title="Open a printable trip sheet you can save as PDF">📄 PDF</button>
           <button class="btn small danger" data-action="trail-del" data-id="${esc(t.id)}">Delete</button>
         </span>
       </div>
+      <div class="trail-thumb">${trailMapSVG(t, { width: 640, height: 280 })}</div>
     </div>`;
   }).join("");
   return `<div class="card">
     <h2>Trail History</h2>
-    <p class="muted" style="font-size:13px">Your saved trips (this device). Tap <b>Show on map</b> to replay a route; the live guild map shows other sharing members' trails in their own colour.</p>
+    <p class="muted" style="font-size:13px">Your saved trips (this device). Each shows a map of the whole route — tap <b>Show on map</b> to replay it live, or <b>🖼 Image</b> / <b>📄 PDF</b> to export a trip sheet.</p>
   </div>${rows}`;
 }
 
@@ -1243,26 +1302,43 @@ function tabLog(): string {
   const today = localDateKey(new Date());
   const tideOpts = ["rising", "falling", "high-slack", "low-slack"].map((x) => `<option>${x}</option>`).join("");
   const dirs = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"].map((x) => `<option>${x}</option>`).join("");
+  const methodOpts = ["Shore", "Boat", "Kayak", "Pier", "Fly", "Ice"].map((x) => `<option>${x}</option>`).join("");
+  const here = esc(state.location?.name ?? "");
   return `
   <div class="card">
     <h2>Log a Trip</h2>
     <form id="logform">
+      <h3 class="form-section">Trip &amp; conditions</h3>
       <div class="form-grid">
         <label class="field">Date<input name="date" type="date" value="${today}" required></label>
         <label class="field">Start<input name="start" type="time" value="06:00"></label>
         <label class="field">End<input name="end" type="time" value="08:00"></label>
-        <label class="field">Species<select name="species">${speciesOpts}</select></label>
-        <label class="field">Count<input name="count" type="number" min="0" value="0"></label>
-        <label class="field">Approx size<input name="size" placeholder="e.g. 30-35 cm"></label>
+        <label class="field">Location / spot<input name="location" value="${here}" placeholder="e.g. McCormacks Beach"></label>
+        <label class="field">Method<select name="method">${methodOpts}</select></label>
+        <label class="field">With<input name="party" placeholder="e.g. Solo, with Dave"></label>
         <label class="field">Tide stage<select name="tideStage">${tideOpts}</select></label>
         <label class="field">Tide height<input name="tideHeight" placeholder="e.g. 1.2 m"></label>
         <label class="field">Wind dir<select name="windDir">${dirs}</select></label>
         <label class="field">Wind speed<input name="windSpeed" placeholder="e.g. 12 km/h"></label>
         <label class="field">Weather<input name="weather" placeholder="e.g. Overcast"></label>
         <label class="field">Water<input name="water" placeholder="e.g. Light chop"></label>
+      </div>
+
+      <h3 class="form-section">Catch &amp; wildlife</h3>
+      <div class="form-grid">
+        <label class="field">Species<select name="species">${speciesOpts}</select></label>
+        <label class="field">Count<input name="count" type="number" min="0" value="0"></label>
+        <label class="field">Approx size<input name="size" placeholder="e.g. 30-35 cm"></label>
+        <label class="field">Approx weight<input name="weight" placeholder="e.g. ~0.5 kg, best 1.1 kg"></label>
         <label class="field">Kept<select name="kept"><option value="kept">kept</option><option value="released">released</option><option value="mixed">mixed</option></select></label>
-        <label class="field">Gear<input name="gear" placeholder="e.g. Sabiki + float"></label>
-        <label class="field wide">Notes<textarea name="notes" placeholder="What worked, where the fish were, bait, behaviour…"></textarea></label>
+        <label class="field">Gear / rig<input name="gear" placeholder="e.g. Sabiki + float"></label>
+        <label class="field">Bait / lure<input name="bait" placeholder="e.g. mackerel strip, white jig"></label>
+        <label class="field wide">Other wildlife seen<input name="wildlife" placeholder="e.g. harbour seals, bald eagle, porpoise, sharks…"></label>
+      </div>
+
+      <h3 class="form-section">Notes</h3>
+      <div class="form-grid">
+        <label class="field wide"><textarea name="notes" placeholder="What worked, where the fish were, behaviour, anything to remember for next time…"></textarea></label>
       </div>
       <div class="mt flex">
         <button class="btn primary" type="submit">＋ Add trip</button>
@@ -1276,6 +1352,7 @@ function tabLog(): string {
       <h2 style="margin:0">Catch Log (${state.log.length})</h2>
       <div class="flex">
         ${state.log.length === 0 ? `<button class="btn small" data-action="seed">Load sample trips</button>` : ""}
+        ${state.log.length ? `<button class="btn small" data-action="exportcsv" title="Spreadsheet of every trip — opens in Excel/Sheets">⬇ Export CSV</button>` : ""}
         <button class="btn small" data-action="export">⬇ Export JSON</button>
         <button class="btn small" data-action="import">⬆ Import</button>
         ${state.log.length ? `<button class="btn small danger" data-action="clearlog">Clear all</button>` : ""}
@@ -1288,20 +1365,22 @@ function tabLog(): string {
 function logTable(): string {
   return `<div class="table-scroll mt"><table class="logtable">
     <thead><tr>
-      <th>Date</th><th>Time</th><th>Species</th><th>#</th><th>Size</th><th>Tide</th><th>Wind</th><th>Weather</th><th>Kept</th><th>Gear</th><th>Notes</th><th></th>
+      <th>Date</th><th>Time</th><th>Spot</th><th>Species</th><th>#</th><th>Size</th><th>Kept</th><th>Bait / gear</th><th>Tide</th><th>Wind</th><th>Weather</th><th>Wildlife</th><th>Notes</th><th></th>
     </tr></thead>
     <tbody>
       ${state.log.map((r) => `<tr>
         <td>${esc(r.date)}</td>
         <td>${esc(r.start)}-${esc(r.end)}</td>
+        <td>${esc(r.location ?? "")}${r.method ? `<br><span class="muted" style="font-size:11px">${esc(r.method)}</span>` : ""}</td>
         <td>${esc(r.species)}</td>
         <td>${r.count}</td>
-        <td>${esc(r.size)}</td>
+        <td>${esc(r.size)}${r.weight ? `<br><span class="muted" style="font-size:11px">${esc(r.weight)}</span>` : ""}</td>
+        <td>${esc(r.kept)}</td>
+        <td>${esc(r.bait || r.gear)}${r.bait && r.gear ? `<br><span class="muted" style="font-size:11px">${esc(r.gear)}</span>` : ""}</td>
         <td>${esc(r.tideStage)} ${esc(r.tideHeight)}</td>
         <td>${esc(r.windDir)} ${esc(r.windSpeed)}</td>
         <td>${esc(r.weather)}</td>
-        <td>${esc(r.kept)}</td>
-        <td>${esc(r.gear)}</td>
+        <td class="notes">${esc(r.wildlife ?? "")}</td>
         <td class="notes">${esc(r.notes)}</td>
         <td><button class="btn small danger" data-action="del" data-id="${r.id}">✕</button></td>
       </tr>`).join("")}
@@ -1426,6 +1505,12 @@ async function handleAction(action: string, el: HTMLElement, e: Event) {
       if (trail.active) stopTrailMode();
       else await startTrailMode();
       break;
+    case "trail-pause":
+      pauseTrail();
+      break;
+    case "trail-resume":
+      await resumeTrail();
+      break;
     case "trail-camp": {
       if (!selfLoc) { toast("Waiting for your GPS fix - tap 📍 Find me first."); break; }
       const name = prompt("Name your base camp:", trail.baseCamp?.name || "Base camp");
@@ -1463,6 +1548,24 @@ async function handleAction(action: string, el: HTMLElement, e: Event) {
       viewingHistory = null;
       render();
       break;
+    case "trail-img": {
+      const t = trailHistory.find((x) => x.id === el.dataset.id);
+      if (!t) break;
+      try {
+        const svg = trailMapSVG(t, { width: 1200, height: 720 });
+        const blob = await svgToPngBlob(svg, 1200, 720);
+        downloadBlob(`trip-map-${tripSlug(t)}.png`, blob);
+        toast("Trip map image saved");
+      } catch (err) {
+        toast(`Image export failed: ${(err as Error).message}`);
+      }
+      break;
+    }
+    case "trail-pdf": {
+      const t = trailHistory.find((x) => x.id === el.dataset.id);
+      if (t) printTrailReport(t);
+      break;
+    }
     case "trail-del":
       trailHistory = deleteArchivedTrail(el.dataset.id!);
       if (viewingHistory && viewingHistory.id === el.dataset.id) viewingHistory = null;
@@ -1495,6 +1598,7 @@ async function handleAction(action: string, el: HTMLElement, e: Event) {
         presenceSetTrail(null);
         trail = emptyTrail();
         saveTrail(trail);
+        startSelfWatch(); // resume the live marker if we'd frozen it while paused
         mapApi?.setTrail(trail);
         refreshTrailPanel();
         toast("Trip cleared.");
@@ -1603,8 +1707,12 @@ async function handleAction(action: string, el: HTMLElement, e: Event) {
       }
       break;
     case "export":
-      downloadText("mccormacks-catchlog.json", exportJSON());
+      downloadText("mccormacks-catchlog.json", exportJSON(), "application/json");
       toast("Exported catch log");
+      break;
+    case "exportcsv":
+      downloadText("mccormacks-catchlog.csv", exportCSV(), "text/csv");
+      toast("Exported spreadsheet (CSV)");
       break;
     case "import":
       importFlow();
@@ -1624,6 +1732,9 @@ function onLogSubmit(e: Event) {
   const date = g("date");
   const snapMoon = moonInfo(new Date(date + "T12:00:00"));
   const waterSnap = waterTempForDate(date);
+  const location = g("location").trim();
+  // tag with coordinates when the spot matches the active location (handy for mapping)
+  const matchesActive = location && location === (state.location?.name ?? "");
   const rec: CatchRecord = {
     id: newId(),
     date, start: g("start"), end: g("end"),
@@ -1634,6 +1745,14 @@ function onLogSubmit(e: Event) {
     size: g("size"), kept: g("kept") as CatchRecord["kept"], gear: g("gear"), notes: g("notes"),
     moonPhase: snapMoon.name,
     waterTemp: waterSnap,
+    location: location || undefined,
+    lat: matchesActive ? state.location.lat : undefined,
+    lon: matchesActive ? state.location.lon : undefined,
+    method: g("method") || undefined,
+    party: g("party").trim() || undefined,
+    bait: g("bait").trim() || undefined,
+    weight: g("weight").trim() || undefined,
+    wildlife: g("wildlife").trim() || undefined,
   };
   state.log = addRecord(rec);
   syncTripSave(rec); // share to the guild backend so admins can see it (Firebase)
@@ -1672,12 +1791,73 @@ function importFlow() {
   input.click();
 }
 
-function downloadText(name: string, text: string) {
-  const blob = new Blob([text], { type: "application/json" });
+function downloadText(name: string, text: string, mime = "application/json") {
+  downloadBlob(name, new Blob([text], { type: mime }));
+}
+function downloadBlob(name: string, blob: Blob) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url; a.download = name; a.click();
-  URL.revokeObjectURL(url);
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
+}
+
+// Date-stamped, filesystem-safe name for a saved trip's exports.
+function tripSlug(t: ArchivedTrail): string {
+  return t.startedAt ? localDateKey(new Date(t.startedAt)) : t.id;
+}
+
+// Open a printable one-page trip sheet (route map + stats + marked spots) in a
+// hidden iframe and trigger the browser's print dialog - "Save as PDF" from there.
+// No PDF library needed, and it prints cleanly on mobile and desktop.
+function printTrailReport(t: ArchivedTrail) {
+  const when = t.startedAt ? fmtDate(new Date(t.startedAt)) : "Trip";
+  const dur = (t.startedAt && t.endedAt) ? fmtDur(t.endedAt - t.startedAt) : "-";
+  const km = trailLengthKm(t).toFixed(2);
+  const svg = trailMapSVG(t, { width: 900, height: 560 });
+  const stat = (label: string, val: string) => `<div class="st"><b>${esc(val)}</b><span>${esc(label)}</span></div>`;
+  const poiRows = t.pois.map((p, i) =>
+    `<tr><td>${i + 1}</td><td>${esc(p.name)}</td><td>${p.lat.toFixed(5)}, ${p.lon.toFixed(5)}</td></tr>`).join("");
+  const camp = t.baseCamp
+    ? `<p class="camp">⛺ Base camp: <b>${esc(t.baseCamp.name)}</b> — ${t.baseCamp.lat.toFixed(5)}, ${t.baseCamp.lon.toFixed(5)}</p>` : "";
+  const html = `<!doctype html><html><head><meta charset="utf-8"><title>Trip — ${esc(when)}</title>
+    <style>
+      *{box-sizing:border-box} body{font:14px/1.45 system-ui,Segoe UI,sans-serif;color:#23303a;margin:0;padding:24px}
+      h1{font-size:20px;margin:0 0 2px} .sub{color:#6b7785;margin:0 0 14px}
+      .stats{display:flex;gap:18px;flex-wrap:wrap;margin:0 0 14px}
+      .st b{display:block;font-size:18px} .st span{font-size:12px;color:#6b7785;text-transform:uppercase;letter-spacing:.4px}
+      .map{border:1px solid #cfc7b4;border-radius:8px;overflow:hidden;max-width:100%} .map svg{display:block;width:100%;height:auto}
+      .camp{margin:12px 0 4px}
+      table{border-collapse:collapse;width:100%;margin-top:8px;font-size:13px}
+      th,td{text-align:left;padding:6px 8px;border-bottom:1px solid #e3e8ee} th{color:#6b7785;font-size:11px;text-transform:uppercase}
+      footer{margin-top:18px;color:#9aa6b2;font-size:11px}
+      @media print{body{padding:0}}
+    </style></head><body>
+    <h1>Trip — ${esc(when)}</h1>
+    <p class="sub">Nova Scotian Anglers Guild · trail record</p>
+    <div class="stats">${stat("Duration", dur)}${stat("Distance", km + " km")}${stat("Track points", String(t.points.length))}${stat("Marked spots", String(t.pois.length))}</div>
+    <div class="map">${svg}</div>
+    ${camp}
+    ${t.pois.length ? `<table><thead><tr><th>#</th><th>Marked spot</th><th>Coordinates</th></tr></thead><tbody>${poiRows}</tbody></table>` : ""}
+    <footer>Generated ${esc(fmtDate(new Date()))} · McCormacks Fishing Analyst</footer>
+  </body></html>`;
+
+  const frame = document.createElement("iframe");
+  frame.setAttribute("aria-hidden", "true");
+  frame.style.cssText = "position:fixed;right:0;bottom:0;width:0;height:0;border:0;visibility:hidden";
+  frame.onload = () => {
+    try {
+      const win = frame.contentWindow;
+      if (!win) throw new Error("print frame unavailable");
+      win.focus();
+      win.print();
+    } catch (err) {
+      toast(`PDF export failed: ${(err as Error).message}`);
+    }
+    setTimeout(() => frame.remove(), 1500);
+  };
+  document.body.appendChild(frame);
+  frame.srcdoc = html;
+  toast("Opening printable trip sheet — choose “Save as PDF”.");
 }
 
 let toastTimer: number | undefined;
