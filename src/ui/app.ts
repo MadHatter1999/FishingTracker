@@ -4,6 +4,8 @@ import { computeScores, overallScoreForDay, localDateKey } from "../engine/score
 import { computeDay, type DayContext } from "../engine/context";
 import { tideVelocityAt } from "../engine/merge";
 import { buildSeaState, type SeaState } from "../engine/seastate";
+import { buildLakeState, lakeActivityLabel } from "../engine/lakestate";
+import type { LakeState } from "../types";
 import { generateBriefing } from "../engine/briefing";
 import { trailMapSVG, svgToPngBlob } from "../util/trailmap";
 import { tideChartSVG, gaugeSVG, scoreColor } from "./charts";
@@ -488,6 +490,18 @@ function seaStateNow(): SeaState | null {
   if (!b || b.location.kind !== "salt") return null;
   return seaStateForHour(nowHour(b));
 }
+// Modelled lake stratification state for the active freshwater spot - the lake
+// equivalent of seaStateNow(). Surface temp comes from the live air-temp-based
+// estimate (merge.ts); depth/clarity from the NS Lake Survey when available.
+function lakeStateNow(b: Bundle, date?: Date): LakeState | null {
+  if (b.location.kind !== "fresh") return null;
+  const h = nowHour(b);
+  return buildLakeState({
+    month: (date ?? new Date()).getMonth() + 1,
+    surfaceTempC: h.waterTemp ?? 15,
+    survey: b.lakeSurvey ?? null,
+  });
+}
 // Current wind (km/h + deg FROM) for the flow layer's wind-Ekman drift.
 function windNow(): { speedKmh: number; dirFromDeg: number } | null {
   const b = state.bundle;
@@ -497,6 +511,7 @@ function windNow(): { speedKmh: number; dirFromDeg: number } | null {
   return { speedKmh: h.windSpeed, dirFromDeg: h.windDir };
 }
 const SEA_ICON: Record<SeaState["label"], string> = { calm: "🟢", moderate: "🟡", rough: "🟠", dangerous: "🔴" };
+const LAKE_ICON: Record<ReturnType<typeof lakeActivityLabel>, string> = { slow: "🔴", fair: "🟠", good: "🟡", prime: "🟢" };
 
 async function postRender() {
   if (state.tab !== "map") { stopSelfWatch(); return; }
@@ -607,6 +622,7 @@ function condStrip(b: Bundle): string {
   const fresh = b.location.kind === "fresh";
   const tideArrow = h.tideState === "rising" ? "↑ rising" : h.tideState === "falling" ? "↓ falling" : h.tideState.replace("-", " ");
   const sea = fresh ? null : seaStateForHour(h);
+  const lake = fresh ? lakeStateNow(b) : null;
   return `<div class="cond-strip">
     ${cond("Now", `${w.icon} ${w.label}`, fmtTime(h.time))}
     ${cond("Air", `${Math.round(h.airTemp)}°C`, `feels ${Math.round(h.airTemp)}°`)}
@@ -614,7 +630,7 @@ function condStrip(b: Bundle): string {
     ${cond("Wind", `${Math.round(h.windSpeed)} km/h`, `${compassDir(h.windDir)} · gust ${Math.round(h.windGust)}`)}
     ${cond("Pressure", `${Math.round(h.pressure)} hPa`, `${h.pressureTrend >= 0 ? "↑" : "↓"} ${Math.abs(h.pressureTrend).toFixed(1)}/3h`)}
     ${fresh
-      ? cond("Type", "Freshwater", "no tide")
+      ? cond("Lake", lake ? `${LAKE_ICON[lakeActivityLabel(lake.score)]} ${lake.label}` : "Freshwater", lake?.stratified && lake.thermoclineDepthM ? `thermocline ~${lake.thermoclineDepthM} m` : lake ? lakeActivityLabel(lake.score) : "no tide")
       : cond("Tide", h.tideHeight != null ? `${h.tideHeight.toFixed(2)} m` : "-", tideArrow)}
     ${fresh
       ? cond("Sun", fmtTime(b.astro.find((a) => a.date === localDateKey(h.time))?.sunrise ?? null), "sunrise")
@@ -1138,8 +1154,63 @@ function tabSpecies(b: Bundle, ctx: DayContext): string {
     </div>
     <div class="note-sm">* "KEEP" still requires you to verify current DFO Maritimes / NS Anglers' Handbook seasons, size/slot limits and licences. When in doubt, release.</div>
   </div>
-  ${fresh ? stockingPanel(b) : predatorPanel(b)}
+  ${fresh ? lakeProfilePanel(b, ctx.date) + waterwayFlowPanel(b) + stockingPanel(b) : predatorPanel(b)}
   ${nearbyPanel(b)}`;
+}
+
+// B + C: modelled lake stratification (where the fish are holding) backed by the
+// real measured morphometry/clarity from the NS Environment Lake Survey.
+function lakeProfilePanel(b: Bundle, date: Date): string {
+  const ls = lakeStateNow(b, date);
+  if (!ls) return "";
+  const sv = b.lakeSurvey ?? null;
+  const act = lakeActivityLabel(ls.score);
+  const fmtD = (d: string | null) => (d ? new Date(d).toLocaleDateString("en-CA", { year: "numeric", month: "short" }) : "-");
+  const stat = (label: string, val: string) => `<span class="badge">${label}: <b>${esc(val)}</b></span>`;
+  const morph = sv
+    ? `<div class="note-sm flex" style="flex-wrap:wrap;gap:8px;margin:2px 0 8px">
+        ${sv.maxDepthM != null ? stat("Max depth", `${sv.maxDepthM} m`) : ""}
+        ${sv.meanDepthM != null ? stat("Mean depth", `${sv.meanDepthM} m`) : ""}
+        ${sv.secchiM != null ? stat("Clarity (Secchi)", `${sv.secchiM.toFixed(1)} m`) : ""}
+        ${sv.ph != null ? stat("pH", sv.ph.toFixed(1)) : ""}
+        ${sv.colourTCU != null ? stat("Colour", `${Math.round(sv.colourTCU)} TCU`) : ""}
+        ${sv.bottomDO != null ? stat("Bottom O₂", `${sv.bottomDO.toFixed(1)} mg/L`) : ""}
+      </div>
+      <div class="note-sm">Measured: <b>${esc(sv.lakeName)}</b>${sv.stationCount > 1 ? ` (${sv.stationCount} survey stations)` : ""}, surveyed ${fmtD(sv.assessed)} - <a href="https://hub.arcgis.com/maps/1936e489870343cd8a6e79d312f6d0f5" target="_blank" rel="noopener">NS Environment Lake Survey →</a></div>`
+    : `<p class="note-sm muted" style="margin:0 0 6px">No NS lake-survey station within ~3 km, so depth is estimated. The stratification read below is modelled from temperature and season.</p>`;
+  return `<div class="card mt">
+    <h2>🌡 Lake conditions &amp; depth <span class="legalflag ${act === "prime" || act === "good" ? "lf-keep" : "lf-check"}">${LAKE_ICON[act]} ${ls.label}</span></h2>
+    <p class="muted" style="font-size:13px;margin:0 0 8px">Surface ~${ls.surfaceTempC.toFixed(1)} °C. ${esc(ls.targetDepth)}</p>
+    ${morph}
+    ${ls.notes.length ? `<ul class="tac-list" style="margin:6px 0 0">${ls.notes.map((n) => `<li>${esc(n)}</li>`).join("")}</ul>` : ""}
+  </div>`;
+}
+
+// A: live river/stream/lake level + flow from the nearest Environment Canada gauge.
+function waterwayFlowPanel(b: Bundle): string {
+  const hy = b.hydro ?? null;
+  const arrow = (t: "rising" | "falling" | "steady") => (t === "rising" ? "↑ rising" : t === "falling" ? "↓ falling" : "→ steady");
+  if (!hy) {
+    return `<div class="card mt">
+      <h2>🌊 Waterway flow &amp; level</h2>
+      <p class="muted" style="font-size:13px;margin:0">No live hydrometric gauge within ~60 km of ${esc(b.location.name)}. Inflows/outflows still concentrate fish - fish them on and just after rain.</p>
+    </div>`;
+  }
+  const lvl = hy.latest.level != null ? `${hy.latest.level.toFixed(2)} m` : "-";
+  const dis = hy.latest.discharge != null ? `${hy.latest.discharge.toFixed(1)} m³/s` : null;
+  const sig = Math.round(hy.flowSignal * 100);
+  return `<div class="card mt">
+    <h2>🌊 Waterway flow &amp; level <span class="legalflag lf-check">${hy.kind === "river" ? "river / stream" : "lake gauge"}</span></h2>
+    <p class="muted" style="font-size:13px;margin:0 0 8px">Nearest live gauge: <b>${esc(hy.stationName)}</b> (${hy.distanceKm} km away), from Environment Canada. ${hy.kind === "river"
+      ? "Higher, rising flow oxygenates inflows/outflows and pulls fish onto the moving water."
+      : "Lake level trend hints at how much water is moving through the inflows and outlet."}</p>
+    <div class="note-sm flex" style="flex-wrap:wrap;gap:8px">
+      <span class="badge live">Level: <b>${lvl}</b> ${arrow(hy.levelTrend)}</span>
+      ${dis ? `<span class="badge live">Flow: <b>${dis}</b> ${arrow(hy.dischargeTrend)}</span>` : ""}
+      <span class="badge">Moving-water index: <b>${sig}%</b></span>
+    </div>
+    <div class="note-sm" style="margin-top:8px"><a href="https://wateroffice.ec.gc.ca/report/real_time_e.html?stn=${esc(hy.stationNumber)}" target="_blank" rel="noopener">Environment Canada gauge ${esc(hy.stationNumber)} →</a></div>
+  </div>`;
 }
 
 // "What's where": real marine species documented near this point (OBIS, global).

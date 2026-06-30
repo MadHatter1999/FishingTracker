@@ -196,7 +196,10 @@ export function rankHotspots(bundle: Bundle, date: Date): Hotspot[] {
   const avgDirDeg = circularMeanDeg(hrs.map((h) => h.windDir));
   const windDir = compassDir(avgDirDeg);
   const peakVel = Math.max(...hrs.map((h) => Math.abs(h.tideVelocity ?? 0)));
-  const movingNorm = fresh ? 0.5 : Math.min(1, peakVel / (0.28 * (bundle.tide.meanRange || 1.4)));
+  // Freshwater "moving water" comes from the nearest live river/lake gauge
+  // (hydrometric.ts flowSignal) instead of the tide; saltwater uses tidal flow.
+  const hydro = bundle.hydro ?? null;
+  const movingNorm = fresh ? (hydro ? hydro.flowSignal : 0.5) : Math.min(1, peakVel / (0.28 * (bundle.tide.meanRange || 1.4)));
 
   const ranked = spots.map((s): Hotspot => {
     let score = s.base;
@@ -214,6 +217,11 @@ export function rankHotspots(bundle: Bundle, date: Date): Hotspot[] {
     score += (movingNorm - 0.5) * 2 * s.likesMovingWater;
     if (s.likesMovingWater > 0.7 && movingNorm > 0.6) why.push("Good current today - this spot fires on flow");
     if (s.likesMovingWater < 0.3 && movingNorm > 0.7) why.push("Strong current - fish the slacker stages here");
+    // freshwater flow read from the live river/lake gauge
+    if (fresh && hydro && s.likesMovingWater >= 0.4) {
+      if (movingNorm > 0.62) why.push(`${hydro.kind === "river" ? "Flows are up" : "Water is up"} (${hydro.stationName}, ${hydro.levelTrend}) - inflows/outflows are oxygenated and pulling fish`);
+      else if (movingNorm < 0.32) why.push(`Low, settled water (${hydro.stationName}) - moving-water marks are slower; lean on deeper structure`);
+    }
 
     score = Math.max(0, Math.min(10, score));
     return { name: s.name, rank: 0, score: +score.toFixed(1), why: why.join(" · ") || s.base_desc, bestFor: s.bestFor };

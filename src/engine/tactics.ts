@@ -2,6 +2,7 @@ import type { Bundle, SpeciesForecast, FishingWindow } from "../types";
 import { localDateKey } from "./score";
 import { fmtTime, fmtRange } from "../util/format";
 import { compassDir } from "../config";
+import { buildLakeState } from "./lakestate";
 
 export interface Tactics {
   setup: string;
@@ -35,8 +36,22 @@ export function buildTactics(
   const avgWindDir = hrs.length ? compassDir(circ(hrs.map((h) => h.windDir))) : "-";
   const avgWind = hrs.length ? Math.round(hrs.reduce((s, h) => s + h.windSpeed, 0) / hrs.length) : 0;
 
+  // Freshwater: model the lake's stratification so the depth/clarity advice is right.
+  const fresh = bundle.location.kind === "fresh";
+  const lake = fresh
+    ? buildLakeState({ month: date.getMonth() + 1, surfaceTempC: avgWater ?? 15, survey: bundle.lakeSurvey ?? null })
+    : null;
+
   const bright = avgCloud < 40;
-  const lureColors = bright
+  const lureColors = lake
+    ? lake.clarityM != null && lake.clarityM < 1.5
+      ? "Stained/tannic water → dark or high-vis, high-vibration: black, chartreuse, fire-tiger, spinnerbaits/bladed baits"
+      : lake.clarityM != null && lake.clarityM > 4
+      ? "Very clear water → natural & subtle: green-pumpkin, smelt/shiner patterns, light fluoro, finesse profiles"
+      : bright
+      ? "Bright sun → natural: green-pumpkin, watermelon, silver/shiner; downsize and slow down midday"
+      : "Overcast/low light → high-contrast: white, chartreuse, gold blades, a touch bigger profile"
+    : bright
     ? "Bright sun → natural/chrome: silver, blue-chrome, mackerel/herring patterns; smaller profiles"
     : "Overcast/low light → high-contrast: white, chartreuse, pink, glow; a touch bigger profile";
 
@@ -59,14 +74,23 @@ export function buildTactics(
   const startSpot = topSpots[0]?.name ?? "Boardwalk drop-off";
   const moveSpot = topSpots[1]?.name ?? "Island-facing shoreline";
 
-  const shoreTips: string[] = [
-    `Wind is ${avgWindDir} ~${avgWind} km/h - start on the sheltered side and keep the wind off your casting shoulder.`,
-    "Polarized glasses to read current seams, colour changes and bait flicks on the surface.",
-    "Bring a long-handled net or drop-net at the boardwalk - landing fish up the rocks loses a lot of them.",
-    "Watch for diving terns/gulls and surface 'nervous water' - that's bait, and the predators are under it.",
-    avgWater != null ? `Water is ~${avgWater.toFixed(1)} °C - ${avgWater < 8 ? "cold; fish deeper & slower" : avgWater > 16 ? "warm; fish dawn/dusk & deeper midday" : "in the sweet spot for mackerel/pollock"}.` : "Check water temp on arrival.",
-    "Barbless hooks for any striped bass, and have a wet-hands release plan for anything you can't keep.",
-  ];
+  const shoreTips: string[] = fresh && lake
+    ? [
+        lake.targetDepth,
+        ...lake.notes.slice(0, 2),
+        `Wind is ${avgWindDir} ~${avgWind} km/h - the wind-blown shore stacks plankton and bait and fish follow it; start there when it's safe.`,
+        "Polarized glasses to read weed edges, drop-offs, shoals and cruising fish.",
+        avgWater != null ? `Surface water ~${avgWater.toFixed(1)} °C - ${avgWater < 10 ? "cold; fish deep & slow" : avgWater > 21 ? "warm; dawn/dusk shallow, deeper/cooler midday" : "in the active range for trout & bass"}.` : "Check water temp on arrival.",
+        "Barbless hooks and a wet-hands release for anything undersized or out of season - verify NS Anglers' Handbook limits.",
+      ]
+    : [
+        `Wind is ${avgWindDir} ~${avgWind} km/h - start on the sheltered side and keep the wind off your casting shoulder.`,
+        "Polarized glasses to read current seams, colour changes and bait flicks on the surface.",
+        "Bring a long-handled net or drop-net at the boardwalk - landing fish up the rocks loses a lot of them.",
+        "Watch for diving terns/gulls and surface 'nervous water' - that's bait, and the predators are under it.",
+        avgWater != null ? `Water is ~${avgWater.toFixed(1)} °C - ${avgWater < 8 ? "cold; fish deeper & slower" : avgWater > 16 ? "warm; fish dawn/dusk & deeper midday" : "in the sweet spot for mackerel/pollock"}.` : "Check water temp on arrival.",
+        "Barbless hooks for any striped bass, and have a wet-hands release plan for anything you can't keep.",
+      ];
 
   const actionPlan = buildActionPlan(win, top, second, startSpot, moveSpot, avgWindDir, avgWind);
 

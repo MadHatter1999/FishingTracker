@@ -5,6 +5,7 @@ import { locationForPoint, HOME } from "../services/locations";
 import { WATERWAYS } from "../waterways";
 import { createFlowLayer, type TidalFlow } from "./flow";
 import { createCurrentLayer } from "./current";
+import { createLakeDepthLayer } from "./lakedepth";
 import type { WaveComponent } from "../engine/seastate";
 import type { TaggedAnimal, AnglerPresence, LandSighting } from "../types";
 import type { TrailState } from "../store/trail";
@@ -158,7 +159,7 @@ async function cacheArea(
 // Remember which base + overlay layers the user had on, so they survive the
 // map being torn down and remounted when a new location loads.
 interface LayerPrefs { base: string; overlays: string[]; }
-const LAYER_KEY = "mccormacks.maplayers.v7";
+const LAYER_KEY = "mccormacks.maplayers.v9";
 function loadLayerPrefs(): LayerPrefs | null {
   try {
     const raw = localStorage.getItem(LAYER_KEY);
@@ -424,6 +425,14 @@ export function mountMap(opts: MountOpts): MapApi {
   // --- ocean current (real Open-Meteo data, sampled on a grid) ---
   const currentLayer = createCurrentLayer();
 
+  // --- province-wide modelled lake-depth field (tiled; self-fetching water mask) ---
+  if (!map.getPane("lakedepth")) {
+    const p = map.createPane("lakedepth");
+    p.style.zIndex = "240"; // above base/overlay tiles, below waterway lines + markers
+    p.style.pointerEvents = "none";
+  }
+  const lakeDepthLayer = createLakeDepthLayer();
+
   // --- layers control with persisted on/off state ---
   const bases: Record<string, L.Layer> = { "Street (OSM)": osm, "Topographic": topo };
   const overlays: Record<string, L.Layer> = {
@@ -434,6 +443,7 @@ export function mountMap(opts: MountOpts): MapApi {
     "Chlorophyll": chlorophyll,
     "Saltwater spots": saltLayer,
     "Freshwater spots": freshLayer,
+    "Lake depth": lakeDepthLayer,
     "Crown land": crownLand,
     "Hiking trails": hikingTrails,
     "Sea charts / depths": seamarks,
@@ -449,7 +459,7 @@ export function mountMap(opts: MountOpts): MapApi {
   const onOverlays = prefs
     ? prefs.overlays
     : active.kind === "fresh"
-    ? ["Guild members", "Crown land", "Hiking trails", "Land predators (sightings)", "Waterway links", "Freshwater spots"]
+    ? ["Guild members", "Crown land", "Hiking trails", "Land predators (sightings)", "Waterway links", "Freshwater spots", "Lake depth"]
     : ["Guild members", "Tidal flow (animated)", "Sea charts / depths", "Waterway links", "Ocean predators", "Saltwater spots", "Freshwater spots"];
   for (const name of Object.keys(overlays)) if (onOverlays.includes(name)) overlays[name].addTo(map);
 
@@ -461,6 +471,21 @@ export function mountMap(opts: MountOpts): MapApi {
     saveLayerPrefs({ base, overlays: on });
   };
   map.on("overlayadd overlayremove baselayerchange", savePrefs);
+
+  // --- lake-depth legend (only while the modelled depth overlay is on) ---
+  const modelLegend = new L.Control({ position: "bottomleft" });
+  modelLegend.onAdd = () => {
+    const d = L.DomUtil.create("div", "lakedepth-legend");
+    d.style.cssText = "background:rgba(8,20,32,.78);color:#dbe7f0;padding:6px 9px;border-radius:8px;font:11px/1.35 system-ui,sans-serif;box-shadow:0 1px 6px rgba(0,0,0,.4);pointer-events:none";
+    d.innerHTML =
+      `<b>Lake depth</b> <span style="opacity:.65">(estimated)</span><br>` +
+      `<span style="display:inline-block;width:64px;height:8px;border-radius:2px;background:linear-gradient(90deg,rgb(233,201,106),rgb(95,176,216),rgb(47,127,192),rgb(16,52,104));vertical-align:middle;margin-right:5px"></span>shallow &rarr; deep<br>` +
+      `<span style="opacity:.65">rough: all NS lakes, from shoreline distance</span>`;
+    return d;
+  };
+  const syncModelLegend = () => { if (map.hasLayer(lakeDepthLayer)) modelLegend.addTo(map); else modelLegend.remove(); };
+  map.on("overlayadd overlayremove", syncModelLegend);
+  syncModelLegend();
 
   // --- flow legend (only visible while the animated tidal-flow layer is on) ---
   const flowLegend = new L.Control({ position: "bottomleft" });

@@ -103,6 +103,54 @@ export interface StockingInfo {
   recentlyStocked: boolean; // within ~12 weeks
 }
 
+// --- Freshwater: live river/stream/lake level + flow (Environment Canada) ---
+export interface HydroPoint {
+  time: string; // ISO
+  level: number | null; // m (gauge datum)
+  discharge: number | null; // m3/s
+}
+export interface HydroInfo {
+  stationName: string;
+  stationNumber: string;
+  distanceKm: number;
+  kind: "river" | "lake"; // discharge present -> moving water; level-only -> lake gauge
+  latest: HydroPoint;
+  series: HydroPoint[]; // recent (downsampled) for a sparkline / trend
+  levelTrend: "rising" | "falling" | "steady";
+  dischargeTrend: "rising" | "falling" | "steady";
+  flowSignal: number; // 0..1 "how much moving water right now" - drives fresh hotspot scoring
+}
+
+// --- Freshwater: NS Environment Lake Survey morphometry (measured, historical) ---
+export interface LakeSurvey {
+  lakeName: string;
+  maxDepthM: number | null;
+  meanDepthM: number | null;
+  secchiM: number | null; // water clarity (Secchi disk)
+  thermoclineNote: string | null; // survey thermocline field (raw)
+  surfaceTempC: number | null; // survey-day reading (NOT live)
+  bottomDO: number | null; // bottom dissolved oxygen mg/L
+  ph: number | null;
+  colourTCU: number | null; // water colour (bog-stained vs clear)
+  assessed: string | null; // ISO date the lake was surveyed
+  distanceKm: number;
+  stationCount: number; // survey stations matched to this lake
+}
+// --- Freshwater: modelled lake stratification state (the freshwater "sea state") ---
+export interface LakeState {
+  phase: "ice" | "cold" | "spring-turnover" | "stratified" | "fall-turnover" | "mixed";
+  label: string;
+  surfaceTempC: number;
+  maxDepthM: number | null;
+  measured: boolean; // depth came from a real survey vs estimated
+  stratified: boolean;
+  thermoclineDepthM: number | null;
+  targetDepth: string; // where the fish are holding + how to fish it
+  clarityM: number | null;
+  score: number; // 0..100 comfort/activity proxy
+  notes: string[];
+}
+
 export interface Hotspot {
   name: string;
   rank: number;
@@ -230,6 +278,8 @@ export interface Bundle {
   landPredators?: LandSighting[]; // recent land-predator sightings near here (iNaturalist)
   nearbyTaxa?: OccTaxon[]; // species documented near here (OBIS, marine) - "what's where"
   stocking?: StockingInfo | null; // provincial stocking history (freshwater)
+  hydro?: HydroInfo | null; // live river/stream/lake level + flow (freshwater)
+  lakeSurvey?: LakeSurvey | null; // measured lake morphometry/clarity (freshwater)
   fetchedAt: Date;
   warnings: string[];
 }
